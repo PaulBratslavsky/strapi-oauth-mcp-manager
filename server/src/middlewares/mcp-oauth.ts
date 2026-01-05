@@ -1,7 +1,9 @@
 /**
  * MCP OAuth Authentication Middleware
  *
- * This middleware provides OAuth 2.0 authentication for all registered MCP endpoints.
+ * This middleware provides OAuth 2.0 authentication for all MCP endpoints.
+ * Uses convention-based protection: any route matching /api/{plugin}/mcp is protected.
+ *
  * It supports dual authentication:
  * - OAuth 2.0 tokens (for ChatGPT and other OAuth clients)
  * - Direct Strapi API tokens (for Claude Desktop and scripts)
@@ -14,6 +16,12 @@ import type { Core } from '@strapi/strapi';
 import { PLUGIN_ID } from '../pluginId';
 
 const PLUGIN_UID = `plugin::${PLUGIN_ID}` as const;
+
+/**
+ * Convention-based MCP endpoint pattern.
+ * Matches: /api/{plugin-name}/mcp or /api/{plugin-name}/mcp/...
+ */
+const MCP_ENDPOINT_PATTERN = /^\/api\/[^/]+\/mcp(\/.*)?$/;
 
 /**
  * Extract bearer token from Authorization header
@@ -92,41 +100,24 @@ async function validateOAuthToken(
 }
 
 /**
+ * Check if path is a protected MCP endpoint using convention-based pattern.
+ * Any route matching /api/{plugin}/mcp is automatically protected.
+ */
+function isMcpEndpoint(path: string): boolean {
+  return MCP_ENDPOINT_PATTERN.test(path);
+}
+
+/**
  * MCP OAuth Authentication Middleware Factory
  */
 const mcpOauthMiddleware = (config: any, { strapi }: { strapi: Core.Strapi }) => {
-  // Cache for registered endpoints (refreshed periodically)
-  let endpointCache: string[] = [];
-  let lastCacheUpdate = 0;
-  const CACHE_TTL = 60000; // 1 minute
-
-  async function refreshEndpointCache() {
-    const now = Date.now();
-    if (now - lastCacheUpdate > CACHE_TTL) {
-      try {
-        const endpoints = await strapi.documents(`${PLUGIN_UID}.mcp-endpoint`).findMany({
-          filters: { active: true },
-        });
-        endpointCache = endpoints.map((e: any) => e.path);
-        lastCacheUpdate = now;
-      } catch (error) {
-        strapi.log.error(`[${PLUGIN_ID}] Error refreshing endpoint cache`, { error });
-      }
-    }
-  }
-
-  function isProtectedPath(path: string): boolean {
-    return endpointCache.some(endpoint => path.includes(endpoint));
-  }
-
   return async (ctx: any, next: () => Promise<void>) => {
-    // Refresh cache periodically
-    await refreshEndpointCache();
-
-    // Only apply to registered MCP endpoints
-    if (!isProtectedPath(ctx.path)) {
+    // Convention-based protection: any /api/*/mcp route is protected
+    if (!isMcpEndpoint(ctx.path)) {
       return next();
     }
+
+    strapi.log.debug(`[${PLUGIN_ID}] Protecting MCP endpoint: ${ctx.path}`);
 
     const authHeader = ctx.request.headers.authorization;
     const token = extractBearerToken(authHeader);
