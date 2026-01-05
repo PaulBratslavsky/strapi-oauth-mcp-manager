@@ -1,0 +1,51 @@
+{
+  "kind": "collectionType",
+  "collectionName": "mcp_oauth_tokens",
+  "info": {
+    "singularName": "mcp-oauth-token",
+    "pluralName": "mcp-oauth-tokens",
+    "displayName": "MCP OAuth Token",
+    "description": "OAuth 2.0 access and refresh tokens"
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {
+    "content-manager": {
+      "visible": false
+    },
+    "content-type-builder": {
+      "visible": false
+    }
+  },
+  "attributes": {
+    "accessToken": {
+      "type": "string",
+      "required": true,
+      "unique": true,
+      "private": true
+    },
+    "refreshToken": {
+      "type": "string",
+      "required": true,
+      "unique": true,
+      "private": true
+    },
+    "clientId": {
+      "type": "string",
+      "required": true
+    },
+    "expiresAt": {
+      "type": "datetime",
+      "required": true
+    },
+    "refreshExpiresAt": {
+      "type": "datetime",
+      "required": true
+    },
+    "revoked": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "kind": "collectionType",
+  "collectionName": "mcp_oauth_codes",
+  "info": {
+    "singularName": "mcp-oauth-code",
+    "pluralName": "mcp-oauth-codes",
+    "displayName": "MCP OAuth Code",
+    "description": "OAuth 2.0 authorization codes"
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {
+    "content-manager": {
+      "visible": false
+    },
+    "content-type-builder": {
+      "visible": false
+    }
+  },
+  "attributes": {
+    "code": {
+      "type": "string",
+      "required": true,
+      "unique": true
+    },
+    "clientId": {
+      "type": "string",
+      "required": true
+    },
+    "redirectUri": {
+      "type": "string",
+      "required": true
+    },
+    "codeChallenge": {
+      "type": "string"
+    },
+    "codeChallengeMethod": {
+      "type": "string"
+    },
+    "expiresAt": {
+      "type": "datetime",
+      "required": true
+    },
+    "used": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}

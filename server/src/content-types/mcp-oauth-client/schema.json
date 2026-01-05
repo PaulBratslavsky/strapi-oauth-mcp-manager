@@ -1,0 +1,53 @@
+{
+  "kind": "collectionType",
+  "collectionName": "mcp_oauth_clients",
+  "info": {
+    "singularName": "mcp-oauth-client",
+    "pluralName": "mcp-oauth-clients",
+    "displayName": "MCP OAuth Client",
+    "description": "OAuth 2.0 clients for MCP authentication"
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {
+    "content-manager": {
+      "visible": true
+    },
+    "content-type-builder": {
+      "visible": true
+    }
+  },
+  "attributes": {
+    "name": {
+      "type": "string",
+      "required": true
+    },
+    "clientId": {
+      "type": "string",
+      "required": true,
+      "unique": true
+    },
+    "clientSecret": {
+      "type": "string",
+      "required": true,
+      "private": true
+    },
+    "redirectUris": {
+      "type": "json",
+      "required": true
+    },
+    "strapiApiToken": {
+      "type": "string",
+      "required": true,
+      "private": true
+    },
+    "description": {
+      "type": "text"
+    },
+    "active": {
+      "type": "boolean",
+      "default": true
+    }
+  }
+}
