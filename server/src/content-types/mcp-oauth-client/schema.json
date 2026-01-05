@@ -38,7 +38,7 @@
       "required": true
     },
     "strapiApiToken": {
-      "type": "string",
+      "type": "text",
       "required": true,
       "private": true
     },
