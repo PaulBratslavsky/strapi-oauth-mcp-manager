@@ -116,7 +116,21 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => ({
     }
 
     // Validate redirect_uri (supports wildcard patterns like g-*)
-    const allowedRedirects = client.redirectUris as string[];
+    // Handle both array and string storage of redirectUris
+    let allowedRedirects: string[] = [];
+    if (Array.isArray(client.redirectUris)) {
+      allowedRedirects = client.redirectUris;
+    } else if (typeof client.redirectUris === 'string') {
+      try {
+        allowedRedirects = JSON.parse(client.redirectUris);
+      } catch {
+        allowedRedirects = [client.redirectUris];
+      }
+    }
+
+    strapi.log.debug(`[${PLUGIN_ID}] Checking redirect_uri: ${redirect_uri}`);
+    strapi.log.debug(`[${PLUGIN_ID}] Allowed redirects (${typeof client.redirectUris}): ${JSON.stringify(allowedRedirects)}`);
+
     if (!matchRedirectUri(redirect_uri, allowedRedirects)) {
       strapi.log.warn(`[${PLUGIN_ID}] Invalid redirect_uri: ${redirect_uri}`);
       strapi.log.warn(`[${PLUGIN_ID}] Allowed patterns: ${allowedRedirects.join(', ')}`);
