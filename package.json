@@ -1,6 +1,6 @@
 {
   "name": "strapi-oauth-mcp-manager",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Centralized OAuth 2.0 authentication manager for Strapi MCP plugins. Supports ChatGPT, Claude, and custom OAuth clients.",
   "keywords": [
     "strapi",
