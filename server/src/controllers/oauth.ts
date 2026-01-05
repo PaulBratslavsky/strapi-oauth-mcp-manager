@@ -58,21 +58,18 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => ({
   /**
    * OAuth 2.0 Protected Resource Metadata (RFC 9728)
    * GET /.well-known/oauth-protected-resource
+   *
+   * Convention-based protection: all /api/{plugin}/mcp endpoints are protected.
    */
   async protectedResource(ctx: any) {
     const baseUrl = getBaseUrl(ctx, strapi);
     const pluginPath = `/api/${PLUGIN_ID}`;
     const authServer = `${baseUrl}${pluginPath}`;
 
-    // Get all registered MCP endpoints
-    const endpoints = await strapi.documents(`${PLUGIN_UID}.mcp-endpoint`).findMany({
-      filters: { active: true },
-    });
-
-    const resources = endpoints.map((e: any) => `${baseUrl}${e.path}`);
-
+    // Convention-based: any /api/*/mcp endpoint is protected
+    // Return the base API URL - clients should use the specific MCP endpoint they need
     ctx.body = {
-      resource: resources.length === 1 ? resources[0] : resources,
+      resource: `${baseUrl}/api`,
       authorization_servers: [authServer],
       bearer_methods_supported: ['header'],
     };
