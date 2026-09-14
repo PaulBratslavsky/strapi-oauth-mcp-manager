@@ -3,9 +3,14 @@
  *
  * Authorization server logic for the official Strapi MCP server. Each approved
  * authorization becomes a "grant": an OAuth access/refresh token pair backed by
- * an admin API token that is owned by the approving admin user and capped at
- * that user's permissions. The MCP gate swaps the OAuth access token for the
- * admin token, so core's /mcp handler authenticates it like any other admin token.
+ * an admin token owned by the admin user who approved it. Usually that is a
+ * token the user created in Settings → Admin Tokens and picked on the consent page;
+ * optionally the plugin mints one carrying the user's full permissions. The MCP
+ * gate swaps the OAuth access token for the admin token, so core's /mcp handler
+ * authenticates it like any other admin token.
+ *
+ * Because every backing token is owned by the approving user, deactivating or
+ * deleting that user cuts off all of their MCP sessions.
  */
 
 import type { Core } from '@strapi/strapi';
@@ -47,9 +52,18 @@ export class OAuthError extends Error {
   }
 }
 
+export interface SelectableToken {
+  id: number;
+  name: string;
+  description?: string | null;
+  expiresAt?: string | null;
+}
+
 export type AccessTokenResult =
   | { valid: true; adminAccessKey: string; grantId: number }
   | { valid: false; reason: string };
+
+const MINTED_TOKEN_PREFIX = 'MCP OAuth · ';
 
 const toIso = (secondsFromNow: number) => new Date(Date.now() + secondsFromNow * 1000).toISOString();
 const isExpired = (date: string | Date | null | undefined) => !date || new Date(date).getTime() <= Date.now();
@@ -66,7 +80,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
   });
 
   /**
-   * Mint an admin API token owned by `userId`, carrying that user's current
+   * Mint an admin token owned by `userId`, carrying that user's current
    * permissions. Core clamps it to the user's ceiling and keeps it in sync
    * when the user's roles change.
    */
@@ -97,7 +111,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       }));
 
     const suffix = generateToken('', 4);
-    const name = `MCP OAuth · ${client.name.slice(0, 40)} · ${user.email} · ${suffix}`;
+    const name = `${MINTED_TOKEN_PREFIX}${client.name.slice(0, 40)} · ${user.email} · ${suffix}`;
 
     return adminTokens().create(
       {
@@ -121,6 +135,34 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     } catch (error) {
       strapi.log.warn(`[${PLUGIN_ID}] Could not revoke admin token ${adminTokenId}: ${(error as Error).message}`);
     }
+  };
+
+  const isActiveUser = async (userId: number) => {
+    const user = await strapi.db.query('admin::user').findOne({ where: { id: userId }, select: ['id', 'isActive', 'blocked'] });
+    return Boolean(user && user.isActive === true && user.blocked !== true);
+  };
+
+  const ownerIdOf = (token: any) => {
+    const owner = token?.adminUserOwner;
+    return owner === null || owner === undefined ? null : Number(typeof owner === 'object' ? owner.id : owner);
+  };
+
+  /** Load an admin token the user owns, with its decrypted key. Throws OAuthError if it can't back a session. */
+  const loadOwnedToken = async (tokenId: number, userId: number) => {
+    const token = await adminTokens().getById(tokenId, { includeDecryptedKey: true });
+    if (!token || token.kind !== 'admin' || ownerIdOf(token) !== userId) {
+      throw new OAuthError('invalid_grant', 'The selected admin token no longer exists or is not yours');
+    }
+    if (token.expiresAt && new Date(token.expiresAt).getTime() <= Date.now()) {
+      throw new OAuthError('invalid_grant', 'The selected admin token has expired');
+    }
+    if (!token.accessKey) {
+      throw new OAuthError(
+        'invalid_grant',
+        'The selected admin token cannot be used because its key cannot be read. Regenerate it in Settings → Admin Tokens.'
+      );
+    }
+    return token;
   };
 
   const issueTokens = () => {
@@ -200,6 +242,8 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     async createAuthorizationCode(input: {
       client: OAuthClient;
       adminUserId: number;
+      /** Admin token the user picked, or null for "all of my permissions". */
+      adminTokenId: number | null;
       redirectUri: string;
       codeChallenge?: string;
       codeChallengeMethod?: string;
@@ -212,6 +256,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
           codeHash: hashToken(code),
           clientId: input.client.clientId,
           adminUserId: input.adminUserId,
+          adminTokenId: input.adminTokenId,
           redirectUri: input.redirectUri,
           codeChallenge: input.codeChallenge ?? null,
           codeChallengeMethod: input.codeChallenge ? input.codeChallengeMethod ?? 'S256' : null,
@@ -254,7 +299,17 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         throw new OAuthError('invalid_grant', 'Public clients must use PKCE');
       }
 
-      const adminToken = await mintAdminToken(codeRow.adminUserId, client);
+      if (!(await isActiveUser(codeRow.adminUserId))) {
+        throw new OAuthError('invalid_grant', 'The authorizing admin user is no longer active');
+      }
+
+      const ownsAdminToken = !codeRow.adminTokenId;
+      if (ownsAdminToken && !config().allowUserPermissions) {
+        throw new OAuthError('invalid_grant', 'Sessions must use an admin token');
+      }
+      const adminToken = ownsAdminToken
+        ? await mintAdminToken(codeRow.adminUserId, client)
+        : await loadOwnedToken(codeRow.adminTokenId, codeRow.adminUserId);
       const tokens = issueTokens();
 
       try {
@@ -264,16 +319,22 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
             clientId: client.clientId,
             adminUserId: codeRow.adminUserId,
             adminTokenId: adminToken.id,
+            ownsAdminToken,
+            adminKeyHash: hashToken(adminToken.accessKey),
             scope: codeRow.scope,
             resource: codeRow.resource,
           },
         });
       } catch (error) {
-        await revokeAdminToken(adminToken.id);
+        if (ownsAdminToken) {
+          await revokeAdminToken(adminToken.id);
+        }
         throw error;
       }
 
-      strapi.log.info(`[${PLUGIN_ID}] Issued MCP grant for client "${client.name}" (admin token ${adminToken.id})`);
+      strapi.log.info(
+        `[${PLUGIN_ID}] Issued MCP grant for client "${client.name}" using ${ownsAdminToken ? 'a minted' : 'the selected'} admin token ${adminToken.id}`
+      );
       return tokens.response(codeRow.scope);
     },
 
@@ -293,7 +354,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         await this.revokeGrant(grant.id);
         throw new OAuthError('invalid_grant', 'Refresh token expired');
       }
-      if (!(await adminTokens().getById(grant.adminTokenId))) {
+      if (!(await adminTokens().getById(grant.adminTokenId)) || !(await isActiveUser(grant.adminUserId))) {
         await this.revokeGrant(grant.id);
         throw new OAuthError('invalid_grant', 'This authorization was revoked');
       }
@@ -304,7 +365,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     },
 
     /**
-     * Resolve an OAuth access token to the admin API token behind it.
+     * Resolve an OAuth access token to the admin token behind it.
      * Returns `valid: false` for unknown, expired, or revoked tokens.
      */
     async resolveAccessToken(accessToken: string): Promise<AccessTokenResult> {
@@ -327,6 +388,16 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
           `[${PLUGIN_ID}] Could not decrypt admin token ${grant.adminTokenId}. Did admin.secrets.encryptionKey change?`
         );
         return { valid: false, reason: 'decrypt_failed' };
+      }
+      if (grant.adminKeyHash && !safeEqual(hashToken(adminToken.accessKey), grant.adminKeyHash)) {
+        // The token was regenerated in Settings → Admin Tokens; treat that as a revocation.
+        await this.revokeGrant(grant.id);
+        return { valid: false, reason: 'grant_revoked' };
+      }
+      // Core already rejects tokens whose owner is inactive. The approving user is the owner,
+      // but check explicitly so a deactivated user is cut off even if that ever changes.
+      if (!(await isActiveUser(grant.adminUserId))) {
+        return { valid: false, reason: 'user_inactive' };
       }
 
       // Best effort; a failed timestamp write must not block the request.
@@ -355,28 +426,75 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         return false;
       }
       await strapi.db.query(UID.grant).delete({ where: { id: grantId } });
-      await revokeAdminToken(grant.adminTokenId);
+      // Only delete tokens this plugin minted. Tokens the user picked stay in Settings.
+      if (grant.ownsAdminToken) {
+        await revokeAdminToken(grant.adminTokenId);
+      }
       return true;
+    },
+
+    /** Drop sessions backed by an admin token that no longer exists (deleted in Settings or with its owner). */
+    async removeGrantsForAdminToken(adminTokenId: number) {
+      const { count } = await strapi.db.query(UID.grant).deleteMany({ where: { adminTokenId } });
+      if (count) {
+        strapi.log.info(`[${PLUGIN_ID}] Ended ${count} MCP session(s) because admin token ${adminTokenId} was deleted`);
+      }
+      return count;
+    },
+
+    /** Revoke every session a user approved. Returns how many were revoked. */
+    async revokeUserGrants(adminUserId: number) {
+      const grants = await strapi.db.query(UID.grant).findMany({ where: { adminUserId }, select: ['id'] });
+      for (const grant of grants) {
+        await this.revokeGrant(grant.id);
+      }
+      return grants.length;
+    },
+
+    /** Admin tokens the user may attach to a session: their own, unexpired, not minted by this plugin. */
+    async listSelectableTokens(userId: number): Promise<SelectableToken[]> {
+      const tokens = await strapi.db.query('admin::api-token').findMany({
+        where: { kind: 'admin', adminUserOwner: { id: userId } },
+        select: ['id', 'name', 'description', 'expiresAt', 'encryptedKey'],
+        orderBy: { name: 'asc' },
+      });
+      const now = Date.now();
+      return tokens
+        .filter((t: any) => t.encryptedKey && !t.name.startsWith(MINTED_TOKEN_PREFIX))
+        .filter((t: any) => !t.expiresAt || new Date(t.expiresAt).getTime() > now)
+        .map((t: any) => ({ id: t.id, name: t.name, description: t.description, expiresAt: t.expiresAt }));
     },
 
     async listGrants() {
       const grants = await strapi.db.query(UID.grant).findMany({
-        select: ['id', 'clientId', 'adminUserId', 'adminTokenId', 'scope', 'expiresAt', 'refreshExpiresAt', 'lastUsedAt', 'createdAt'],
+        select: ['id', 'clientId', 'adminUserId', 'adminTokenId', 'ownsAdminToken', 'scope', 'expiresAt', 'refreshExpiresAt', 'lastUsedAt', 'createdAt'],
         orderBy: { createdAt: 'desc' },
       });
       const clientIds = [...new Set(grants.map((g: any) => g.clientId))];
       const userIds = [...new Set(grants.map((g: any) => g.adminUserId))];
-      const [clients, users] = await Promise.all([
+      const tokenIds = [...new Set(grants.map((g: any) => g.adminTokenId))];
+      const [clients, users, tokens] = await Promise.all([
         strapi.db.query(UID.client).findMany({ where: { clientId: { $in: clientIds } }, select: ['clientId', 'name'] }),
-        strapi.db.query('admin::user').findMany({ where: { id: { $in: userIds } }, select: ['id', 'email', 'firstname', 'lastname'] }),
+        strapi.db.query('admin::user').findMany({ where: { id: { $in: userIds } }, select: ['id', 'email', 'isActive', 'blocked'] }),
+        strapi.db.query('admin::api-token').findMany({ where: { id: { $in: tokenIds } }, select: ['id', 'name'] }),
       ]);
       const clientNames = new Map(clients.map((c: any) => [c.clientId, c.name]));
-      const userEmails = new Map(users.map((u: any) => [u.id, u.email]));
-      return grants.map((g: any) => ({
-        ...g,
-        clientName: clientNames.get(g.clientId) ?? g.clientId,
-        userEmail: userEmails.get(g.adminUserId) ?? null,
-      }));
+      const usersById = new Map(users.map((u: any) => [u.id, u]));
+      const tokenNames = new Map(tokens.map((t: any) => [t.id, t.name]));
+      const orphaned = grants.filter((g: any) => !tokenNames.has(g.adminTokenId));
+      for (const grant of orphaned) {
+        await this.removeGrantsForAdminToken(grant.adminTokenId);
+      }
+      return grants.filter((g: any) => tokenNames.has(g.adminTokenId)).map((g: any) => {
+        const user: any = usersById.get(g.adminUserId);
+        return {
+          ...g,
+          clientName: clientNames.get(g.clientId) ?? g.clientId,
+          userEmail: user?.email ?? null,
+          userActive: Boolean(user && user.isActive === true && user.blocked !== true),
+          tokenName: g.ownsAdminToken ? null : tokenNames.get(g.adminTokenId) ?? null,
+        };
+      });
     },
 
     async listClients() {

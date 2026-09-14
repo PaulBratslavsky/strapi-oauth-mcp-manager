@@ -9,6 +9,12 @@ export interface PluginConfig {
   dynamicClientRegistration: boolean;
   /** How often expired codes and grants are cleaned up, in milliseconds. 0 disables it. */
   cleanupIntervalMs: number;
+  /**
+   * Offer "All of my permissions" on the consent page, which mints a session token
+   * carrying the user's full admin permissions. Off by default: sessions use an admin
+   * token the user picks.
+   */
+  allowUserPermissions: boolean;
 }
 
 export default {
@@ -18,6 +24,7 @@ export default {
     authorizationCodeTtl: 10 * 60,
     dynamicClientRegistration: true,
     cleanupIntervalMs: 60 * 60 * 1000,
+    allowUserPermissions: false,
   } satisfies PluginConfig,
   validator(config: Partial<PluginConfig>) {
     for (const key of ['accessTokenTtl', 'refreshTokenTtl', 'authorizationCodeTtl', 'cleanupIntervalMs'] as const) {

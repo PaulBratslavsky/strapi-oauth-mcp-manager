@@ -1,14 +1,14 @@
 /**
  * MCP OAuth gate
  *
- * Sits in front of core's POST /mcp handler, which only understands admin API tokens
+ * Sits in front of core's POST /mcp handler, which only understands admin tokens
  * and answers 401 without telling the client where to log in.
  *
  * - No bearer token: 401 with a WWW-Authenticate header pointing at the protected
  *   resource metadata, so MCP clients can start the OAuth flow (RFC 9728).
- * - An OAuth access token issued by this plugin: swap it for the admin API token
+ * - An OAuth access token issued by this plugin: swap it for the admin token
  *   behind the grant, then let core authenticate the request as usual.
- * - Anything else (for example an admin API token pasted into a client config):
+ * - Anything else (for example an admin token pasted into a client config):
  *   passed through untouched.
  */
 

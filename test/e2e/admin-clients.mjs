@@ -1,76 +1,86 @@
-// Confidential client (ChatGPT-style) created from the admin API, plus admin revocation.
-const BASE = process.env.BASE ?? 'http://localhost:1337';
-const P = 'strapi-oauth-mcp-manager';
+// Confidential clients created in the admin panel, and every way to revoke access.
+import {
+  BASE, PLUGIN, adminSession, authorize, callTool, check, contentPermission, exchangeCode, finish, mcp, toolNames,
+} from './helpers.mjs';
+
 const REDIRECT = 'https://chatgpt.com/connector_platform_oauth_redirect';
-let failures = 0;
-const check = (name, cond, extra = '') => { console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? `  — ${extra}` : ''}`); if (!cond) failures++; };
-const json = { 'Content-Type': 'application/json' };
-const form = { 'Content-Type': 'application/x-www-form-urlencoded' };
+const admin = await adminSession();
+const plugin = (method, path, body) => admin.call(method, `/${PLUGIN}${path}`, body);
 
-const login = await (await fetch(`${BASE}/admin/login`, { method: 'POST', headers: json, body: JSON.stringify({ email: (process.env.ADMIN_EMAIL ?? 'admin@example.com'), password: (process.env.ADMIN_PASSWORD ?? 'Password123!') }) })).json();
-const jwt = login.data?.token;
-check('admin login', !!jwt);
-const admin = (method, path, body) => fetch(`${BASE}/${P}${path}`, { method, headers: { ...json, Authorization: `Bearer ${jwt}` }, body: body && JSON.stringify(body) });
+let res = await fetch(`${BASE}/${PLUGIN}/grants`);
+check('plugin admin API requires auth', res.status === 401 || res.status === 403, String(res.status));
 
-let res = await fetch(`${BASE}/${P}/grants`);
-check('admin API requires auth', res.status === 401 || res.status === 403, String(res.status));
+res = await plugin('GET', '/overview');
+check('overview reports MCP enabled and encryption key set', res.body.data?.mcpEnabled && res.body.data?.encryptionKeyConfigured);
 
-res = await admin('GET', '/overview');
-const overview = (await res.json()).data;
-check('overview reports MCP enabled + key configured', overview?.mcpEnabled && overview?.encryptionKeyConfigured, JSON.stringify(overview?.endpoints?.resource));
+res = await plugin('POST', '/clients', { name: 'ChatGPT', redirectUris: [REDIRECT], confidential: true });
+const client = res.body.data;
+check('create confidential client', res.status === 201 && client?.clientSecret?.startsWith('mcp_secret_'));
 
-res = await admin('POST', '/clients', { name: 'ChatGPT', redirectUris: [REDIRECT], confidential: true });
-const created = (await res.json()).data;
-check('create confidential client', res.status === 201 && created?.clientSecret?.startsWith('mcp_secret_'));
+const editorToken = await admin.createAdminToken('E2E editor', ['read', 'create', 'update', 'publish'].map(contentPermission));
+const readToken = await admin.createAdminToken('E2E reader', [contentPermission('read')]);
 
-const authorize = await fetch(`${BASE}/api/${P}/oauth/authorize`, {
-  method: 'POST', redirect: 'manual', headers: form,
-  body: new URLSearchParams({ response_type: 'code', client_id: created.clientId, redirect_uri: REDIRECT, state: 's1', email: (process.env.ADMIN_EMAIL ?? 'admin@example.com'), password: (process.env.ADMIN_PASSWORD ?? 'Password123!'), decision: 'approve' }),
-});
-const code = new URL(authorize.headers.get('location')).searchParams.get('code');
-check('confidential client may skip PKCE', authorize.status === 302 && !!code);
+const connect = async (tokenId) => {
+  const flow = await authorize({ authParams: { response_type: 'code', client_id: client.clientId, redirect_uri: REDIRECT, state: 's' }, access: `token:${tokenId}` });
+  return exchangeCode({ code: flow.code, redirect_uri: REDIRECT, client_id: client.clientId, client_secret: client.clientSecret });
+};
 
-const basic = 'Basic ' + Buffer.from(`${created.clientId}:wrong`).toString('base64');
-res = await fetch(`${BASE}/api/${P}/oauth/token`, { method: 'POST', headers: { ...form, Authorization: basic }, body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT }) });
-check('wrong client secret → 401', res.status === 401);
+// Secret checks
+const flow = await authorize({ authParams: { response_type: 'code', client_id: client.clientId, redirect_uri: REDIRECT }, access: `token:${readToken.id}` });
+check('confidential client may skip PKCE', !!flow.code);
+const basic = 'Basic ' + Buffer.from(`${client.clientId}:wrong`).toString('base64');
+check('wrong client secret → 401', (await exchangeCode({ code: flow.code, redirect_uri: REDIRECT }, { Authorization: basic })).status === 401);
 
-const authorize2 = await fetch(`${BASE}/api/${P}/oauth/authorize`, {
-  method: 'POST', redirect: 'manual', headers: form,
-  body: new URLSearchParams({ response_type: 'code', client_id: created.clientId, redirect_uri: REDIRECT, email: (process.env.ADMIN_EMAIL ?? 'admin@example.com'), password: (process.env.ADMIN_PASSWORD ?? 'Password123!'), decision: 'approve' }),
-});
-const code2 = new URL(authorize2.headers.get('location')).searchParams.get('code');
-res = await fetch(`${BASE}/api/${P}/oauth/token`, { method: 'POST', headers: form, body: new URLSearchParams({ grant_type: 'authorization_code', code: code2, redirect_uri: REDIRECT, client_id: created.clientId, client_secret: created.clientSecret }) });
-const tokens = await res.json();
-check('client_secret_post exchange', res.status === 200 && !!tokens.access_token);
+// Two sessions, two tokens, two permission sets
+const editorSession = (await connect(editorToken.id)).body;
+const readerSession = (await connect(readToken.id)).body;
+check('client_secret_post exchange', !!editorSession.access_token && !!readerSession.access_token);
+const editorTools = await toolNames(editorSession.access_token);
+const readerTools = await toolNames(readerSession.access_token);
+check('editor token session can publish', editorTools.includes('publish_article'), editorTools.join(', '));
+check('reader token session is read-only', readerTools.includes('get_article') && !readerTools.includes('update_article'), readerTools.join(', '));
+check('plugin content types are not exposed as MCP tools', !editorTools.some((t) => t.includes('mcp-oauth')));
+check('editor session can create', (await callTool(editorSession.access_token, 'create_article', { data: { title: 'From e2e' } })).ok);
 
-const mcp = (body) => fetch(`${BASE}/mcp`, { method: 'POST', headers: { ...json, Accept: 'application/json, text/event-stream', Authorization: `Bearer ${tokens.access_token}` }, body: JSON.stringify(body) });
-res = await mcp({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
-const text = await res.text();
-const tools = JSON.parse(text.split('\n').find((l) => l.startsWith('data: '))?.slice(6) ?? text).result.tools.map((t) => t.name);
-check('OAuth client content type is not exposed as MCP tools', !tools.some((t) => t.includes('mcp-oauth')), tools.join(', '));
+res = await plugin('GET', '/grants');
+const grants = res.body.data.filter((g) => g.clientId === client.clientId);
+check('sessions list the approving user and token name', grants.some((g) => g.tokenName === editorToken.name && g.userEmail));
 
-res = await admin('GET', '/grants');
-const grants = (await res.json()).data;
-const grant = grants.find((g) => g.clientId === created.clientId);
-check('grant listed with approving user', grant?.userEmail === (process.env.ADMIN_EMAIL ?? 'admin@example.com') && grant?.clientName === 'ChatGPT');
+// Revoke one session: only that one stops, and the token stays
+const readerGrant = grants.find((g) => g.tokenName === readToken.name);
+await plugin('DELETE', `/grants/${readerGrant.id}`);
+check('revoking a session stops it', (await mcp(readerSession.access_token, 'tools/list')).status === 401);
+check('other sessions keep working', (await mcp(editorSession.access_token, 'tools/list')).status === 200);
+check('the chosen token is not deleted', (await admin.call('GET', `/admin/admin-tokens/${readToken.id}`)).status === 200);
 
-const tokenList = await (await fetch(`${BASE}/admin/admin-tokens`, { headers: { Authorization: `Bearer ${jwt}` } })).json().catch(() => ({}));
-const minted = (tokenList.data ?? []).filter((t) => t.name?.startsWith('MCP OAuth · ChatGPT'));
-check('admin token minted and visible in Settings', minted.length >= 1, `${minted.length} token(s)`);
+// Regenerating a token ends its sessions
+const regenSession = (await connect(readToken.id)).body;
+check('new session on the reader token works', (await mcp(regenSession.access_token, 'tools/list')).status === 200);
+await admin.call('POST', `/admin/admin-tokens/${readToken.id}/regenerate`);
+check('regenerating the token ends its sessions', (await mcp(regenSession.access_token, 'tools/list')).status === 401);
 
-res = await admin('DELETE', `/grants/${grant.id}`);
-check('admin revokes grant', res.status === 200);
-res = await mcp({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-check('revoked session → 401', res.status === 401);
-const tokenList2 = await (await fetch(`${BASE}/admin/admin-tokens`, { headers: { Authorization: `Bearer ${jwt}` } })).json().catch(() => ({}));
-check('backing admin token deleted', (tokenList2.data ?? []).filter((t) => t.name?.startsWith('MCP OAuth · ChatGPT')).length === minted.length - 1);
+// Deleting a token ends its sessions
+const deleteSession = (await connect(readToken.id)).body;
+const grantsBefore = (await plugin('GET', '/grants')).body.data.filter((g) => g.adminTokenId === readToken.id).length;
+await admin.call('DELETE', `/admin/admin-tokens/${readToken.id}`);
+const grantsAfter = (await plugin('GET', '/grants')).body.data.filter((g) => g.adminTokenId === readToken.id).length;
+check('deleting the token removes its sessions from the list', grantsBefore > 0 && grantsAfter === 0, `${grantsBefore} → ${grantsAfter}`);
+check('deleting the token ends its sessions', (await mcp(deleteSession.access_token, 'tools/list')).status === 401);
 
-res = await admin('PUT', `/clients/${created.id}`, { active: false });
-check('deactivate client', res.status === 200);
-res = await fetch(`${BASE}/api/${P}/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: created.clientId, redirect_uri: REDIRECT })}`);
-check('inactive client cannot authorize', res.status === 400);
-res = await admin('DELETE', `/clients/${created.id}`);
-check('delete client', res.status === 200);
+// Revoke all for a user
+const second = (await connect(editorToken.id)).body;
+const me = (await admin.call('GET', '/admin/users/me')).body.data;
+res = await plugin('DELETE', `/users/${me.id}/grants`);
+check('revoke all for user reports sessions revoked', res.status === 200 && res.body.data.revoked >= 2, JSON.stringify(res.body));
+check('revoke all for user ends every session', (await mcp(editorSession.access_token, 'tools/list')).status === 401 && (await mcp(second.access_token, 'tools/list')).status === 401);
 
-console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
-process.exit(failures ? 1 : 0);
+// Deactivating the client ends sessions and blocks new ones
+const beforeDeactivate = (await connect(editorToken.id)).body;
+await plugin('PUT', `/clients/${client.id}`, { active: false });
+check('deactivating the client ends its sessions', (await mcp(beforeDeactivate.access_token, 'tools/list')).status === 401);
+res = await fetch(`${BASE}/api/${PLUGIN}/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: client.clientId, redirect_uri: REDIRECT })}`);
+check('inactive client cannot start authorization', res.status === 400);
+check('delete client', (await plugin('DELETE', `/clients/${client.id}`)).status === 200);
+
+await admin.call('DELETE', `/admin/admin-tokens/${editorToken.id}`);
+finish();

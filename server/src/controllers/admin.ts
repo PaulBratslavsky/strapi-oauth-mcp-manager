@@ -16,6 +16,7 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
           mcpEnabled: Boolean(strapi.ai?.mcp?.isEnabled?.()),
           encryptionKeyConfigured: Boolean(strapi.config.get('admin.secrets.encryptionKey')),
           dynamicClientRegistration: config.dynamicClientRegistration,
+          allowUserPermissions: config.allowUserPermissions,
           endpoints,
         },
       };
@@ -31,6 +32,10 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
         return ctx.notFound('Grant not found');
       }
       ctx.body = { data: { revoked: true } };
+    },
+
+    async revokeUserGrants(ctx: any) {
+      ctx.body = { data: { revoked: await service().revokeUserGrants(Number(ctx.params.userId)) } };
     },
 
     async listClients(ctx: any) {

@@ -38,6 +38,20 @@ const bootstrap = async ({ strapi }: { strapi: Core.Strapi }) => {
   ] as any);
 
   const service: OAuthService = strapi.plugin(PLUGIN_ID).service('oauth');
+
+  // End sessions as soon as their admin token is deleted, whether someone deletes it in
+  // Settings → Admin Tokens or Strapi removes it along with its owner.
+  strapi.db.lifecycles.subscribe({
+    models: ['admin::api-token'],
+    async afterDelete(event: any) {
+      const id = event.result?.id;
+      if (id) {
+        await service.removeGrantsForAdminToken(id).catch((error) =>
+          strapi.log.error(`[${PLUGIN_ID}] Could not end sessions for admin token ${id}: ${error.message}`)
+        );
+      }
+    },
+  } as any);
   const { cleanupIntervalMs } = strapi.config.get(`plugin::${PLUGIN_ID}`) as PluginConfig;
   if (cleanupIntervalMs > 0) {
     const cleanup = () =>

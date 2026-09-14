@@ -5,7 +5,7 @@
     "singularName": "mcp-oauth-token",
     "pluralName": "mcp-oauth-tokens",
     "displayName": "MCP OAuth Grant",
-    "description": "An authorized MCP client session, backed by an admin API token"
+    "description": "An authorized MCP client session, backed by an admin token"
   },
   "options": {
     "draftAndPublish": false
@@ -42,6 +42,14 @@
     "adminTokenId": {
       "type": "integer",
       "required": true
+    },
+    "ownsAdminToken": {
+      "type": "boolean",
+      "default": false
+    },
+    "adminKeyHash": {
+      "type": "string",
+      "private": true
     },
     "scope": {
       "type": "string"

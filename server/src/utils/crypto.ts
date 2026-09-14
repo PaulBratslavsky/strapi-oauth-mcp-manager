@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 export const TOKEN_PREFIX = {
   accessToken: 'mcp_at_',
@@ -27,4 +27,25 @@ export const verifyPkce = (codeVerifier: string, codeChallenge: string) => {
   }
   const computed = createHash('sha256').update(codeVerifier).digest('base64url');
   return safeEqual(computed, codeChallenge);
+};
+
+/**
+ * A short-lived, signed proof that a user signed in on the consent page, bound to one
+ * authorization request. Lets the token picker step skip re-entering the password
+ * without server-side session state.
+ */
+export const signConsentTicket = (secret: string, userId: number, binding: string, ttlSeconds = 600) => {
+  const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const payload = `${userId}.${expiresAt}`;
+  const signature = createHmac('sha256', secret).update(`${payload}.${binding}`).digest('base64url');
+  return `${payload}.${signature}`;
+};
+
+export const verifyConsentTicket = (secret: string, ticket: string, binding: string): number | null => {
+  const [userId, expiresAt, signature] = ticket.split('.');
+  if (!userId || !expiresAt || !signature || Number(expiresAt) < Date.now() / 1000) {
+    return null;
+  }
+  const expected = createHmac('sha256', secret).update(`${userId}.${expiresAt}.${binding}`).digest('base64url');
+  return safeEqual(signature, expected) ? Number(userId) : null;
 };

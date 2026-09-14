@@ -10,8 +10,9 @@ import type { Core } from '@strapi/strapi';
 import { PLUGIN_ID } from '../pluginId';
 import type { PluginConfig } from '../config';
 import { OAuthError, type OAuthClient, type OAuthService, type TokenEndpointAuthMethod } from '../services/oauth';
-import { getEndpoints, isAllowedRegisteredRedirectUri, matchRedirectUri } from '../utils/url';
-import { renderAuthorizePage, renderErrorPage } from '../views/authorize-page';
+import { signConsentTicket, verifyConsentTicket } from '../utils/crypto';
+import { getBaseUrl, getEndpoints, isAllowedRegisteredRedirectUri, matchRedirectUri } from '../utils/url';
+import { renderAuthorizePage, renderChooseAccessPage, renderErrorPage } from '../views/authorize-page';
 
 const AUTH_METHODS: TokenEndpointAuthMethod[] = ['client_secret_basic', 'client_secret_post', 'none'];
 
@@ -213,7 +214,11 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
       );
     },
 
-    /** POST: check the admin credentials, then redirect back with a code. */
+    /**
+     * POST, in two steps:
+     * 1. `signin`: check the admin credentials, then show the access picker.
+     * 2. `choose`: verify the signed consent ticket and the chosen access, then redirect back with a code.
+     */
     async authorizeSubmit(ctx: any) {
       const body = ctx.request.body ?? {};
       const request = await validateAuthorizationRequest(ctx, body);
@@ -221,8 +226,10 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
         return;
       }
       const { client, redirectUri, state } = request;
+      const csp = redirectOriginForCsp(redirectUri);
+      const pageProps = authorizePageProps(ctx, client, body);
 
-      if (body.decision !== 'approve') {
+      if (body.decision === 'deny') {
         return redirectWith(ctx, redirectUri, {
           error: 'access_denied',
           error_description: 'The user denied the request',
@@ -230,16 +237,86 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
         });
       }
 
+      // The ticket is bound to this exact authorization request.
+      const binding = [client.clientId, redirectUri, request.codeChallenge ?? '', state ?? ''].join('|');
+      const secret = (strapi.config.get('admin.auth.secret') ?? strapi.config.get('admin.secrets.encryptionKey')) as string;
+      if (!secret) {
+        return sendHtml(ctx, 500, renderErrorPage('Strapi is missing admin.auth.secret.'));
+      }
+
+      const showChooseAccess = async (user: { id: number; email: string }, ticket: string, status = 200, error?: string) => {
+        const tokens = await service().listSelectableTokens(user.id);
+        sendHtml(
+          ctx,
+          status,
+          renderChooseAccessPage({
+            ...pageProps,
+            error,
+            userEmail: user.email,
+            ticket,
+            tokens,
+            allowUserPermissions: config().allowUserPermissions,
+            tokensSettingsUrl: `${getBaseUrl(ctx, strapi)}/admin/settings/admin-tokens`,
+          }),
+          csp
+        );
+      };
+
+      if (body.step === 'choose') {
+        const userId = typeof body.ticket === 'string' ? verifyConsentTicket(secret, body.ticket, binding) : null;
+        const user = userId
+          ? await strapi.db.query('admin::user').findOne({ where: { id: userId }, select: ['id', 'email', 'isActive', 'blocked'] })
+          : null;
+        if (!user || user.isActive !== true || user.blocked === true) {
+          return sendHtml(ctx, 401, renderAuthorizePage({ ...pageProps, error: 'Your sign-in expired. Sign in again.' }), csp);
+        }
+
+        if (body.decision === 'refresh') {
+          return showChooseAccess(user, body.ticket);
+        }
+
+        const access = str(body.access) ?? '';
+        let adminTokenId: number | null = null;
+        if (access === 'user') {
+          if (!config().allowUserPermissions) {
+            return showChooseAccess(user, body.ticket, 400, 'Choose one of your admin tokens.');
+          }
+        } else {
+          const tokenId = Number(access.replace(/^token:/, ''));
+          const selectable = await service().listSelectableTokens(user.id);
+          if (!access.startsWith('token:') || !selectable.some((t) => t.id === tokenId)) {
+            return showChooseAccess(user, body.ticket, 400, 'Choose one of your admin tokens.');
+          }
+          adminTokenId = tokenId;
+        }
+
+        try {
+          const code = await service().createAuthorizationCode({
+            client,
+            adminUserId: user.id,
+            adminTokenId,
+            redirectUri,
+            codeChallenge: request.codeChallenge,
+            codeChallengeMethod: request.codeChallengeMethod,
+            scope: str(body.scope),
+            resource: str(body.resource),
+          });
+          strapi.log.info(
+            `[${PLUGIN_ID}] ${user.email} authorized client "${client.name}" with ${adminTokenId ? `admin token ${adminTokenId}` : 'their own permissions'}`
+          );
+          return redirectWith(ctx, redirectUri, { code, state, iss: getEndpoints(ctx, strapi).issuer });
+        } catch (error) {
+          strapi.log.error(`[${PLUGIN_ID}] Failed to create authorization code: ${(error as Error).stack}`);
+          return redirectWith(ctx, redirectUri, { error: 'server_error', state });
+        }
+      }
+
+      // Step 1: sign in.
       const email = str(body.email)?.trim().toLowerCase() ?? '';
       const password = str(body.password) ?? '';
       const lockKey = `${ctx.request.ip}|${email}`;
       const rerender = (status: number, error: string) =>
-        sendHtml(
-          ctx,
-          status,
-          renderAuthorizePage({ ...authorizePageProps(ctx, client, body), email, error }),
-          redirectOriginForCsp(redirectUri)
-        );
+        sendHtml(ctx, status, renderAuthorizePage({ ...pageProps, email, error }), csp);
 
       if (isLoginLocked(lockKey)) {
         return rerender(429, 'Too many failed attempts. Wait 15 minutes and try again.');
@@ -252,22 +329,7 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
       }
       loginFailures.delete(lockKey);
 
-      try {
-        const code = await service().createAuthorizationCode({
-          client,
-          adminUserId: user.id,
-          redirectUri,
-          codeChallenge: request.codeChallenge,
-          codeChallengeMethod: request.codeChallengeMethod,
-          scope: str(body.scope),
-          resource: str(body.resource),
-        });
-        strapi.log.info(`[${PLUGIN_ID}] ${user.email} authorized client "${client.name}"`);
-        redirectWith(ctx, redirectUri, { code, state, iss: getEndpoints(ctx, strapi).issuer });
-      } catch (error) {
-        strapi.log.error(`[${PLUGIN_ID}] Failed to create authorization code: ${(error as Error).stack}`);
-        redirectWith(ctx, redirectUri, { error: 'server_error', state });
-      }
+      return showChooseAccess(user, signConsentTicket(secret, user.id, binding));
     },
 
     async token(ctx: any) {

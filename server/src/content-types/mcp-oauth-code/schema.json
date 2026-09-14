@@ -52,6 +52,9 @@
     "expiresAt": {
       "type": "datetime",
       "required": true
+    },
+    "adminTokenId": {
+      "type": "integer"
     }
   }
 }

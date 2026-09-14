@@ -21,7 +21,7 @@ import {
   Tr,
   Typography,
 } from '@strapi/design-system';
-import { Duplicate, Plus, Trash } from '@strapi/icons';
+import { Duplicate, Plus, Trash, User } from '@strapi/icons';
 import { Layouts, Page, useFetchClient, useNotification } from '@strapi/strapi/admin';
 
 import { PLUGIN_ID } from '../pluginId';
@@ -30,6 +30,7 @@ interface Overview {
   mcpEnabled: boolean;
   encryptionKeyConfigured: boolean;
   dynamicClientRegistration: boolean;
+  allowUserPermissions: boolean;
   endpoints: Record<string, string>;
 }
 
@@ -37,7 +38,11 @@ interface Grant {
   id: number;
   clientId: string;
   clientName: string;
+  adminUserId: number;
   userEmail: string | null;
+  userActive: boolean;
+  tokenName: string | null;
+  ownsAdminToken: boolean;
   createdAt: string;
   lastUsedAt: string | null;
   refreshExpiresAt: string;
@@ -279,7 +284,10 @@ const HomePage = () => {
             </Section>
           )}
 
-          <Section title="Connected sessions" subtitle="Each session uses an admin API token owned by the person who approved it.">
+          <Section
+            title="Connected sessions"
+            subtitle="Each session uses an admin token owned by the person who approved it. Deactivating that person, or deleting or regenerating the token in Settings → Admin Tokens, also ends the session."
+          >
             {grants.length === 0 ? (
               <EmptyStateLayout content="No MCP clients are connected yet." />
             ) : (
@@ -288,7 +296,7 @@ const HomePage = () => {
                   <Tr>
                     <Th><Typography variant="sigma">Client</Typography></Th>
                     <Th><Typography variant="sigma">Approved by</Typography></Th>
-                    <Th><Typography variant="sigma">Connected</Typography></Th>
+                    <Th><Typography variant="sigma">Access</Typography></Th>
                     <Th><Typography variant="sigma">Last used</Typography></Th>
                     <Th><Typography variant="sigma">Expires</Typography></Th>
                     <Th><Typography variant="sigma">Actions</Typography></Th>
@@ -298,18 +306,43 @@ const HomePage = () => {
                   {grants.map((grant) => (
                     <Tr key={grant.id}>
                       <Td><Typography fontWeight="semiBold">{grant.clientName}</Typography></Td>
-                      <Td><Typography>{grant.userEmail ?? '—'}</Typography></Td>
-                      <Td><Typography>{formatDate(grant.createdAt)}</Typography></Td>
+                      <Td>
+                        <Flex gap={2}>
+                          <Typography>{grant.userEmail ?? '—'}</Typography>
+                          {!grant.userActive && <Badge variant="danger">Inactive</Badge>}
+                        </Flex>
+                      </Td>
+                      <Td>
+                        {grant.ownsAdminToken ? (
+                          <Badge variant="warning">All user permissions</Badge>
+                        ) : (
+                          <Typography>{grant.tokenName ?? '—'}</Typography>
+                        )}
+                      </Td>
                       <Td><Typography>{formatDate(grant.lastUsedAt)}</Typography></Td>
                       <Td><Typography>{formatDate(grant.refreshExpiresAt)}</Typography></Td>
                       <Td>
-                        <IconButton
-                          label={`Revoke ${grant.clientName}`}
-                          variant="ghost"
-                          onClick={() => run(() => del(`/${PLUGIN_ID}/grants/${grant.id}`), 'Session revoked')}
-                        >
-                          <Trash />
-                        </IconButton>
+                        <Flex gap={1}>
+                          <IconButton
+                            label={`Revoke this ${grant.clientName} session`}
+                            variant="ghost"
+                            onClick={() => run(() => del(`/${PLUGIN_ID}/grants/${grant.id}`), 'Session revoked')}
+                          >
+                            <Trash />
+                          </IconButton>
+                          <IconButton
+                            label={`Revoke every session approved by ${grant.userEmail ?? 'this user'}`}
+                            variant="ghost"
+                            onClick={() =>
+                              run(
+                                () => del(`/${PLUGIN_ID}/users/${grant.adminUserId}/grants`),
+                                `All sessions for ${grant.userEmail ?? 'this user'} revoked`
+                              )
+                            }
+                          >
+                            <User />
+                          </IconButton>
+                        </Flex>
                       </Td>
                     </Tr>
                   ))}

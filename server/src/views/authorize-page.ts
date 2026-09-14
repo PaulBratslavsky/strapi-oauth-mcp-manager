@@ -26,6 +26,12 @@ const STYLES = `
   button.primary { background:var(--primary); border-color:var(--primary); color:#fff; }
   .error { border:1px solid var(--danger); color:var(--danger); border-radius:4px; padding:10px 12px; margin:0 0 16px; }
   .warning { font-size:12px; }
+  a { color:var(--primary); }
+  fieldset { border:0; padding:0; margin:0 0 12px; }
+  legend { font-weight:600; font-size:12px; margin:0 0 8px; }
+  .option { display:flex; gap:10px; align-items:flex-start; border:1px solid var(--border); border-radius:4px; padding:10px 12px; margin:0 0 8px; font-weight:normal; font-size:14px; cursor:pointer; }
+  .option input { margin-top:3px; }
+  .option small { display:block; color:var(--muted); font-size:12px; word-break:break-word; }
 `;
 
 const layout = (title: string, body: string) => `<!doctype html>
@@ -40,23 +46,42 @@ const layout = (title: string, body: string) => `<!doctype html>
 <body><main>${body}</main></body>
 </html>`;
 
-export interface AuthorizePageProps {
+export interface TokenOption {
+  id: number;
+  name: string;
+  description?: string | null;
+  expiresAt?: string | null;
+}
+
+interface BasePageProps {
   clientName: string;
   redirectUri: string;
   resource: string;
   /** Hidden OAuth request parameters echoed back on submit. */
   params: Record<string, string | undefined>;
-  email?: string;
-  error?: string;
   registrationType: 'manual' | 'dynamic';
+  error?: string;
 }
 
-export const renderAuthorizePage = (props: AuthorizePageProps) => {
-  const hidden = Object.entries(props.params)
+export interface SignInPageProps extends BasePageProps {
+  email?: string;
+}
+
+export interface ChooseAccessPageProps extends BasePageProps {
+  userEmail: string;
+  ticket: string;
+  tokens: TokenOption[];
+  allowUserPermissions: boolean;
+  tokensSettingsUrl: string;
+}
+
+const hiddenInputs = (params: Record<string, string | undefined>) =>
+  Object.entries(params)
     .filter(([, value]) => value !== undefined && value !== '')
     .map(([name, value]) => `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`)
     .join('');
 
+const header = (props: BasePageProps) => {
   let redirectHost = props.redirectUri;
   try {
     const url = new URL(props.redirectUri);
@@ -64,30 +89,95 @@ export const renderAuthorizePage = (props: AuthorizePageProps) => {
   } catch {
     // keep the raw value
   }
-
-  return layout(
-    `Authorize ${props.clientName}`,
-    `
+  return `
     <h1>Connect to Strapi MCP</h1>
-    <p><span class="client">${escapeHtml(props.clientName)}</span> wants to use this Strapi instance's MCP server on your behalf.</p>
+    <p><span class="client">${escapeHtml(props.clientName)}</span> wants to use this Strapi instance's MCP server.</p>
     <dl class="details">
       <dt>MCP server</dt><dd>${escapeHtml(props.resource)}</dd>
       <dt>Returns you to</dt><dd>${escapeHtml(redirectHost)}</dd>
     </dl>
     ${props.error ? `<div class="error" role="alert">${escapeHtml(props.error)}</div>` : ''}
+  `;
+};
+
+const dynamicWarning = (props: BasePageProps) =>
+  props.registrationType === 'dynamic'
+    ? '<p class="warning">This client registered itself, so only continue if you started this connection.</p>'
+    : '';
+
+export const renderAuthorizePage = (props: SignInPageProps) =>
+  layout(
+    `Authorize ${props.clientName}`,
+    `
+    ${header(props)}
     <form method="post" autocomplete="on">
-      ${hidden}
+      ${hiddenInputs(props.params)}
+      <input type="hidden" name="step" value="signin">
       <label for="email">Admin email</label>
       <input id="email" name="email" type="email" required autocomplete="username" value="${escapeHtml(props.email)}">
       <label for="password">Password</label>
       <input id="password" name="password" type="password" required autocomplete="current-password">
-      <p class="warning">The client will be able to do anything your admin account can do through MCP. You can revoke access at any time from the OAuth MCP Manager page in the admin panel.${
-        props.registrationType === 'dynamic' ? ' This client registered itself, so only continue if you started this connection.' : ''
-      }</p>
+      ${dynamicWarning(props)}
       <div class="actions">
         <button type="submit" name="decision" value="deny" formnovalidate>Deny</button>
-        <button type="submit" name="decision" value="approve" class="primary">Authorize</button>
+        <button type="submit" name="decision" value="continue" class="primary">Continue</button>
       </div>
+    </form>
+  `
+  );
+
+const formatExpiry = (expiresAt?: string | null) =>
+  expiresAt ? `Expires ${new Date(expiresAt).toISOString().slice(0, 10)}` : 'Never expires';
+
+export const renderChooseAccessPage = (props: ChooseAccessPageProps) => {
+  const options = [
+    ...props.tokens.map(
+      (token, index) => `
+      <label class="option">
+        <input type="radio" name="access" value="token:${token.id}" ${index === 0 ? 'checked' : ''} required>
+        <span><strong>${escapeHtml(token.name)}</strong>
+        <small>${escapeHtml(token.description || 'Admin token')} · ${escapeHtml(formatExpiry(token.expiresAt))}</small></span>
+      </label>`
+    ),
+    ...(props.allowUserPermissions
+      ? [
+          `<label class="option">
+        <input type="radio" name="access" value="user" ${props.tokens.length === 0 ? 'checked' : ''} required>
+        <span><strong>All of my permissions</strong><small>Everything your admin account can do</small></span>
+      </label>`,
+        ]
+      : []),
+  ];
+
+  const body =
+    options.length === 0
+      ? `<div class="error" role="alert">You don't have any admin tokens to connect with.</div>
+         <p>Create one with the permissions this client should have in <a href="${escapeHtml(props.tokensSettingsUrl)}" target="_blank" rel="noopener">Settings → Admin Tokens</a>, then choose <strong>Refresh</strong>.</p>
+         <div class="actions">
+           <button type="submit" name="decision" value="deny" formnovalidate>Deny</button>
+           <button type="submit" name="decision" value="refresh" class="primary" formnovalidate>Refresh</button>
+         </div>`
+      : `<fieldset>
+           <legend>Choose what ${escapeHtml(props.clientName)} can access</legend>
+           ${options.join('')}
+         </fieldset>
+         <p class="warning">The client gets exactly the permissions of the token you choose. Revoke access any time on the MCP OAuth page, or by deleting or regenerating the token.</p>
+         ${dynamicWarning(props)}
+         <div class="actions">
+           <button type="submit" name="decision" value="deny" formnovalidate>Deny</button>
+           <button type="submit" name="decision" value="approve" class="primary">Authorize</button>
+         </div>`;
+
+  return layout(
+    `Authorize ${props.clientName}`,
+    `
+    ${header(props)}
+    <p>Signed in as <span class="client">${escapeHtml(props.userEmail)}</span>.</p>
+    <form method="post">
+      ${hiddenInputs(props.params)}
+      <input type="hidden" name="step" value="choose">
+      <input type="hidden" name="ticket" value="${escapeHtml(props.ticket)}">
+      ${body}
     </form>
   `
   );

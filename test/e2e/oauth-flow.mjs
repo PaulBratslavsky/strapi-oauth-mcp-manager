@@ -1,142 +1,109 @@
-// End-to-end OAuth flow against a running Strapi, the way an MCP client does it.
-import { createHash, randomBytes } from 'node:crypto';
+// The OAuth flow an MCP client runs: discovery, registration, consent with a token picker,
+// code exchange with PKCE, MCP calls, refresh rotation and revocation.
+import {
+  BASE, OAUTH, adminSession, authorize, callTool, check, contentPermission, exchangeCode, finish,
+  initializeParams, mcp, pkce, refresh, registerClient, revoke, toolNames,
+} from './helpers.mjs';
 
-const BASE = process.env.BASE ?? 'http://localhost:1337';
-const EMAIL = process.env.ADMIN_EMAIL ?? 'admin@example.com';
-const PASSWORD = process.env.ADMIN_PASSWORD ?? 'Password123!';
 const REDIRECT = 'http://localhost:33418/callback';
 
-let failures = 0;
-const check = (name, cond, extra = '') => {
-  console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? `  — ${extra}` : ''}`);
-  if (!cond) failures++;
-};
-
-const mcp = (token, body) =>
-  fetch(`${BASE}/mcp`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/event-stream',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
-
-const readRpc = async (res) => {
-  const text = await res.text();
-  const dataLine = text.split('\n').find((l) => l.startsWith('data: '));
-  return JSON.parse(dataLine ? dataLine.slice(6) : text);
-};
-
-const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e', version: '1.0' } } };
-const toolsList = { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} };
-
-// 1. Unauthenticated request → 401 + resource_metadata
-let res = await mcp(null, initialize);
+// 1. Unauthenticated request → 401 pointing at protected resource metadata
+let res = await mcp(null, 'initialize', initializeParams);
 const wwwAuth = res.headers.get('www-authenticate') ?? '';
 check('401 without token', res.status === 401, String(res.status));
 const prmUrl = wwwAuth.match(/resource_metadata="([^"]+)"/)?.[1];
 check('WWW-Authenticate has resource_metadata', !!prmUrl, wwwAuth);
 
-// 2. Protected resource metadata → authorization server
+// 2. Discovery
 const prm = await (await fetch(prmUrl)).json();
-check('PRM resource is /mcp', prm.resource === `${BASE}/mcp`, prm.resource);
-const asMeta = await (await fetch(`${prm.authorization_servers[0]}/.well-known/oauth-authorization-server`)).json();
-check('AS metadata has S256 + registration', asMeta.code_challenge_methods_supported?.includes('S256') && !!asMeta.registration_endpoint);
+check('protected resource is /mcp', prm.resource === `${BASE}/mcp`, prm.resource);
+const as = await (await fetch(`${prm.authorization_servers[0]}/.well-known/oauth-authorization-server`)).json();
+check('metadata advertises S256 and registration', as.code_challenge_methods_supported?.includes('S256') && !!as.registration_endpoint);
 
-// 3. Dynamic client registration (public client, like Claude Code)
-res = await fetch(asMeta.registration_endpoint, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ client_name: 'E2E Test Client', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] }),
-});
-const reg = await res.json();
-check('DCR 201', res.status === 201, JSON.stringify(reg));
-res = await fetch(asMeta.registration_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ redirect_uris: ['https://*.evil.com/cb'] }) });
-check('DCR rejects wildcard redirect', res.status === 400);
+// 3. Dynamic client registration
+const reg = await registerClient({ client_name: 'E2E Test Client', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+check('registration returns 201', reg.status === 201, JSON.stringify(reg.body));
+check('registration rejects wildcard redirect', (await registerClient({ redirect_uris: ['https://*.evil.com/cb'] })).status === 400);
 
-// 4. Authorize page
-const verifier = randomBytes(32).toString('base64url');
-const challenge = createHash('sha256').update(verifier).digest('base64url');
-const state = randomBytes(8).toString('hex');
-const authParams = { response_type: 'code', client_id: reg.client_id, redirect_uri: REDIRECT, state, code_challenge: challenge, code_challenge_method: 'S256', resource: prm.resource };
-const authUrl = `${asMeta.authorization_endpoint}?${new URLSearchParams(authParams)}`;
-res = await fetch(authUrl);
-const html = await res.text();
-check('authorize page renders', res.status === 200 && html.includes('E2E Test Client'));
-check('authorize CSP allows redirect origin', (res.headers.get('content-security-policy') ?? '').includes('http://localhost:33418'), res.headers.get('content-security-policy'));
+// A read-only admin token, created the way a user would in Settings → Admin Tokens
+const admin = await adminSession();
+const readOnly = await admin.createAdminToken('E2E read-only', [contentPermission('read')]);
 
-res = await fetch(`${asMeta.authorization_endpoint}?${new URLSearchParams({ ...authParams, code_challenge: '' })}`, { redirect: 'manual' });
+// 4. Authorization request validation
+const { verifier, challenge } = pkce();
+const state = 'state-123';
+const authParams = { response_type: 'code', client_id: reg.body.client_id, redirect_uri: REDIRECT, state, code_challenge: challenge, code_challenge_method: 'S256', resource: prm.resource };
+
+res = await fetch(`${as.authorization_endpoint}?${new URLSearchParams(authParams)}`);
+const signInHtml = await res.text();
+check('sign-in page renders', res.status === 200 && signInHtml.includes('E2E Test Client') && signInHtml.includes('name="password"'));
+check('CSP allows the redirect origin', (res.headers.get('content-security-policy') ?? '').includes('http://localhost:33418'));
+
+res = await fetch(`${as.authorization_endpoint}?${new URLSearchParams({ ...authParams, code_challenge: '' })}`, { redirect: 'manual' });
 check('public client without PKCE is refused', res.status === 302 && res.headers.get('location').includes('error=invalid_request'));
+res = await fetch(`${as.authorization_endpoint}?${new URLSearchParams({ ...authParams, redirect_uri: 'https://evil.com/cb' })}`, { redirect: 'manual' });
+check('unregistered redirect_uri shows an error page, no redirect', res.status === 400);
 
-res = await fetch(`${asMeta.authorization_endpoint}?${new URLSearchParams({ ...authParams, redirect_uri: 'https://evil.com/cb' })}`, { redirect: 'manual' });
-check('unregistered redirect_uri shows error page, no redirect', res.status === 400);
+// 5. Consent
+let flow = await authorize({ authParams, password: 'wrong' });
+check('wrong password is rejected', flow.response.status === 401);
 
-const submit = (extra) =>
-  fetch(asMeta.authorization_endpoint, {
-    method: 'POST',
-    redirect: 'manual',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ ...authParams, ...extra }),
-  });
+flow = await authorize({ authParams, access: `token:${readOnly.id}`, decision: 'deny' });
+check('choose step lists the user\'s admin tokens', flow.tokenIds.includes(readOnly.id));
+check('"All of my permissions" is hidden by default', !flow.offersUser);
+check('deny redirects with access_denied', flow.response.status === 302 && flow.location.includes('error=access_denied'));
 
-res = await submit({ email: EMAIL, password: 'wrong', decision: 'approve' });
-check('wrong password re-renders with 401', res.status === 401);
+flow = await authorize({ authParams, access: 'user' });
+check('"All of my permissions" is refused by default', flow.response.status === 400 && !flow.code);
 
-res = await submit({ decision: 'deny' });
-check('deny redirects with access_denied', res.status === 302 && res.headers.get('location').includes('error=access_denied'));
+flow = await authorize({ authParams, access: 'token:999999' });
+check('a token the user does not own is refused', flow.response.status === 400 && !flow.code);
 
-res = await submit({ email: EMAIL, password: PASSWORD, decision: 'approve' });
-const location = new URL(res.headers.get('location') ?? 'http://x');
-const code = location.searchParams.get('code');
-check('approve redirects with code + state', res.status === 302 && !!code && location.searchParams.get('state') === state, res.headers.get('location'));
+flow = await authorize({ authParams, access: `token:${readOnly.id}` });
+const forged = await fetch(`${OAUTH}/authorize`, {
+  method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ ...authParams, step: 'choose', ticket: flow.ticket.replace(/^\d+/, '999'), access: `token:${readOnly.id}`, decision: 'approve' }),
+});
+check('a tampered consent ticket is rejected', forged.status === 401);
+const otherRequest = await fetch(`${OAUTH}/authorize`, {
+  method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ ...authParams, state: 'different', step: 'choose', ticket: flow.ticket, access: `token:${readOnly.id}`, decision: 'approve' }),
+});
+check('a consent ticket cannot be reused for another request', otherRequest.status === 401);
+check('approve redirects with code and state', flow.response.status === 302 && !!flow.code && new URL(flow.location).searchParams.get('state') === state);
 
-// 5. Token exchange
-const tokenRequest = (params) =>
-  fetch(asMeta.token_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params) });
+// 6. Code exchange
+let tokenRes = await exchangeCode({ code: flow.code, redirect_uri: REDIRECT, client_id: reg.body.client_id, code_verifier: 'x'.repeat(43) });
+check('wrong PKCE verifier is rejected', tokenRes.status === 400);
 
-res = await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT, client_id: reg.client_id, code_verifier: 'x'.repeat(43) });
-check('bad PKCE verifier rejected', res.status === 400);
-// The code was consumed by the failed attempt, so authorize again.
-res = await submit({ email: EMAIL, password: PASSWORD, decision: 'approve' });
-const code2 = new URL(res.headers.get('location')).searchParams.get('code');
+flow = await authorize({ authParams, access: `token:${readOnly.id}` });
+tokenRes = await exchangeCode({ code: flow.code, redirect_uri: REDIRECT, client_id: reg.body.client_id, code_verifier: verifier });
+const tokens = tokenRes.body;
+check('code exchange returns tokens', tokenRes.status === 200 && tokens.access_token?.startsWith('mcp_at_'));
+check('a code cannot be used twice', (await exchangeCode({ code: flow.code, redirect_uri: REDIRECT, client_id: reg.body.client_id, code_verifier: verifier })).status === 400);
 
-res = await tokenRequest({ grant_type: 'authorization_code', code: code2, redirect_uri: REDIRECT, client_id: reg.client_id, code_verifier: verifier });
-const tokens = await res.json();
-check('code exchange returns tokens', res.status === 200 && tokens.access_token?.startsWith('mcp_at_'), JSON.stringify(tokens).slice(0, 120));
-
-res = await tokenRequest({ grant_type: 'authorization_code', code: code2, redirect_uri: REDIRECT, client_id: reg.client_id, code_verifier: verifier });
-check('code replay rejected', res.status === 400);
-
-// 6. Call MCP with the OAuth access token
-res = await mcp(tokens.access_token, initialize);
-const init = await readRpc(res);
-check('MCP initialize with OAuth token', res.status === 200 && !!init.result?.serverInfo, JSON.stringify(init).slice(0, 150));
-res = await mcp(tokens.access_token, toolsList);
-const tools = await readRpc(res);
-const toolNames = tools.result?.tools?.map((t) => t.name) ?? [];
-check('tools/list returns tools', toolNames.length > 0, toolNames.join(', '));
-
-res = await mcp('mcp_at_not-a-real-token', initialize);
+// 7. MCP with the OAuth token uses exactly the chosen token's permissions
+res = await mcp(tokens.access_token, 'initialize', initializeParams);
+check('MCP initialize works with the OAuth token', res.status === 200 && !!res.rpc?.result?.serverInfo);
+const tools = await toolNames(tokens.access_token);
+check('read-only token exposes only read tools', tools.includes('list_article') && !tools.includes('create_article'), tools.join(', '));
+check('create is refused with a read-only token', !(await callTool(tokens.access_token, 'create_article', { data: { title: 'nope' } })).ok);
+res = await mcp('mcp_at_not-a-real-token', 'initialize', initializeParams);
 check('unknown OAuth token → 401 invalid_token', res.status === 401 && (res.headers.get('www-authenticate') ?? '').includes('invalid_token'));
 
-// 7. Refresh rotation
-res = await tokenRequest({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: reg.client_id });
-const refreshed = await res.json();
-check('refresh returns new tokens', res.status === 200 && refreshed.access_token && refreshed.access_token !== tokens.access_token);
-res = await mcp(tokens.access_token, initialize);
-check('old access token rejected after refresh', res.status === 401);
-res = await tokenRequest({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: reg.client_id });
-check('old refresh token rejected after rotation', res.status === 400);
-res = await mcp(refreshed.access_token, toolsList);
-check('new access token works', res.status === 200);
+// 8. Refresh rotation
+const refreshed = await refresh({ refresh_token: tokens.refresh_token, client_id: reg.body.client_id });
+check('refresh returns new tokens', refreshed.status === 200 && refreshed.body.access_token !== tokens.access_token);
+check('old access token stops working', (await mcp(tokens.access_token, 'tools/list')).status === 401);
+check('old refresh token stops working', (await refresh({ refresh_token: tokens.refresh_token, client_id: reg.body.client_id })).status === 400);
+check('new access token works', (await mcp(refreshed.body.access_token, 'tools/list')).status === 200);
 
-// 8. Revocation
-res = await fetch(asMeta.revocation_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: refreshed.refresh_token, client_id: reg.client_id }) });
-check('revoke 200', res.status === 200);
-res = await mcp(refreshed.access_token, initialize);
-check('revoked grant → 401', res.status === 401);
+// 9. Revocation keeps the user's own token
+res = await revoke({ token: refreshed.body.refresh_token, client_id: reg.body.client_id });
+check('revocation returns 200', res.status === 200);
+check('revoked session → 401', (await mcp(refreshed.body.access_token, 'tools/list')).status === 401);
+const stillThere = await admin.call('GET', `/admin/admin-tokens/${readOnly.id}`);
+check('revoking a session does not delete the chosen admin token', stillThere.status === 200);
 
-console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
-process.exit(failures ? 1 : 0);
+await admin.call('DELETE', `/admin/admin-tokens/${readOnly.id}`);
+finish();
