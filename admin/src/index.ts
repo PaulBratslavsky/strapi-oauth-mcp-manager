@@ -1,4 +1,3 @@
-import { getTranslation } from './utils/getTranslation';
 import { PLUGIN_ID } from './pluginId';
 import { Initializer } from './components/Initializer';
 import { PluginIcon } from './components/PluginIcon';
@@ -10,8 +9,9 @@ export default {
       icon: PluginIcon,
       intlLabel: {
         id: `${PLUGIN_ID}.plugin.name`,
-        defaultMessage: PLUGIN_ID,
+        defaultMessage: 'MCP OAuth',
       },
+      permissions: [{ action: `plugin::${PLUGIN_ID}.manage`, subject: null }],
       Component: async () => {
         const { App } = await import('./pages/App');
 

@@ -1,7 +1,8 @@
 import type { Core } from '@strapi/strapi';
+import { registerPermissions } from './permissions';
 
-const register = ({ strapi }: { strapi: Core.Strapi }) => {
-  // register phase
+const register = async ({ strapi }: { strapi: Core.Strapi }) => {
+  await registerPermissions(strapi);
 };
 
 export default register;

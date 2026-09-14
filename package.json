@@ -1,7 +1,7 @@
 {
   "name": "strapi-oauth-mcp-manager",
-  "version": "0.1.5",
-  "description": "Centralized OAuth 2.0 authentication manager for Strapi MCP plugins. Supports ChatGPT, Claude, and custom OAuth clients.",
+  "version": "1.0.0",
+  "description": "OAuth 2.1 authorization server for Strapi's official MCP server (/mcp). Lets Claude, ChatGPT, and other MCP clients connect with a Strapi admin login instead of a pasted token.",
   "keywords": [
     "strapi",
     "plugin",
@@ -12,13 +12,19 @@
     "chatgpt",
     "claude",
     "authentication",
-    "ai"
+    "ai",
+    "admin-token",
+    "pkce"
   ],
   "license": "MIT",
   "author": "Paul Bratslavsky <paul.bratslavsky@strapi.io>",
   "repository": {
     "type": "git",
     "url": "https://github.com/PaulBratslavsky/strapi-oauth-mcp-manager"
+  },
+  "homepage": "https://github.com/PaulBratslavsky/strapi-oauth-mcp-manager#readme",
+  "bugs": {
+    "url": "https://github.com/PaulBratslavsky/strapi-oauth-mcp-manager/issues"
   },
   "publishConfig": {
     "access": "public"
@@ -43,7 +49,9 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "strapi-plugin build",
@@ -51,15 +59,15 @@
     "watch:link": "strapi-plugin watch:link",
     "verify": "strapi-plugin verify",
     "test:ts:front": "run -T tsc -p admin/tsconfig.json",
-    "test:ts:back": "run -T tsc -p server/tsconfig.json"
+    "test:ts:back": "run -T tsc -p server/tsconfig.json",
+    "test:e2e": "node test/e2e/oauth-flow.mjs && node test/e2e/admin-clients.mjs && node test/e2e/users.mjs && node test/e2e/client-token.mjs"
   },
   "dependencies": {
     "@strapi/design-system": "^2.0.0-rc.30",
-    "@strapi/icons": "^2.0.0-rc.30",
-    "react-intl": "^8.0.10"
+    "@strapi/icons": "^2.0.0-rc.30"
   },
   "devDependencies": {
-    "@strapi/strapi": "^5.33.1",
+    "@strapi/strapi": "^5.53.0",
     "@strapi/sdk-plugin": "^5.4.0",
     "prettier": "^3.7.4",
     "react": "^18.3.1",
@@ -68,21 +76,23 @@
     "styled-components": "^6.1.19",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
-    "@strapi/typescript-utils": "^5.33.1",
+    "@strapi/typescript-utils": "^5.53.0",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
-    "@strapi/strapi": "^5.33.1",
-    "@strapi/sdk-plugin": "^5.4.0",
+    "@strapi/strapi": "^5.47.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.30.2",
     "styled-components": "^6.1.19"
   },
+  "engines": {
+    "node": ">=20.0.0 <=26.x.x"
+  },
   "strapi": {
     "kind": "plugin",
     "name": "strapi-oauth-mcp-manager",
-    "displayName": "OAuth MCP Manager",
-    "description": "Centralized OAuth 2.0 authentication for Strapi MCP plugins"
+    "displayName": "MCP OAuth",
+    "description": "OAuth 2.1 sign-in for Strapi's built-in MCP server"
   }
 }

@@ -1,11 +1,11 @@
 {
   "kind": "collectionType",
-  "collectionName": "mcp_oauth_tokens",
+  "collectionName": "mcp_oauth_grants",
   "info": {
     "singularName": "mcp-oauth-token",
     "pluralName": "mcp-oauth-tokens",
-    "displayName": "MCP OAuth Token",
-    "description": "OAuth 2.0 access and refresh tokens"
+    "displayName": "MCP OAuth Grant",
+    "description": "An authorized MCP client session, backed by an admin token"
   },
   "options": {
     "draftAndPublish": false
@@ -19,13 +19,13 @@
     }
   },
   "attributes": {
-    "accessToken": {
+    "accessTokenHash": {
       "type": "string",
       "required": true,
       "unique": true,
       "private": true
     },
-    "refreshToken": {
+    "refreshTokenHash": {
       "type": "string",
       "required": true,
       "unique": true,
@@ -35,6 +35,28 @@
       "type": "string",
       "required": true
     },
+    "adminUserId": {
+      "type": "integer",
+      "required": true
+    },
+    "adminTokenId": {
+      "type": "integer",
+      "required": true
+    },
+    "ownsAdminToken": {
+      "type": "boolean",
+      "default": false
+    },
+    "adminKeyHash": {
+      "type": "string",
+      "private": true
+    },
+    "scope": {
+      "type": "string"
+    },
+    "resource": {
+      "type": "string"
+    },
     "expiresAt": {
       "type": "datetime",
       "required": true
@@ -43,9 +65,8 @@
       "type": "datetime",
       "required": true
     },
-    "revoked": {
-      "type": "boolean",
-      "default": false
+    "lastUsedAt": {
+      "type": "datetime"
     }
   }
 }
