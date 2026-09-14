@@ -84,7 +84,7 @@
   "strapi": {
     "kind": "plugin",
     "name": "strapi-oauth-mcp-manager",
-    "displayName": "OAuth MCP Manager",
-    "description": "Centralized OAuth 2.0 authentication for Strapi MCP plugins"
+    "displayName": "MCP OAuth",
+    "description": "OAuth 2.1 sign-in for Strapi's built-in MCP server"
   }
 }
