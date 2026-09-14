@@ -22,7 +22,7 @@ Strapi 5.47 added an MCP server at `/mcp`. Out of the box it accepts only admin 
 
 This plugin makes Strapi an OAuth authorization server for `/mcp`. When a client connects, the user signs in with their Strapi admin account and chooses one of their admin tokens. The client then gets short-lived OAuth tokens, and every request reaches Strapi's MCP server with that admin token's permissions.
 
-<img src="./docs/sign-in-page.png" alt="Consent page where the user picks which admin token the client can use" width="480">
+<img src="https://raw.githubusercontent.com/PaulBratslavsky/strapi-oauth-mcp-manager/main/docs/sign-in-page.png" alt="Consent page where the user picks which admin token the client can use" width="480">
 
 ---
 
@@ -262,6 +262,14 @@ The **MCP OAuth** admin page requires the **Manage MCP OAuth clients and grants*
 
 ---
 
+## Roadmap
+
+- **Phase 2:** sign in on the consent page with admin SSO and social providers such as GitHub and Google.
+
+See [CHANGELOG.md](./CHANGELOG.md) for release notes.
+
+---
+
 ## Contributing
 
 Issues and pull requests are welcome.
@@ -283,4 +291,4 @@ The tests sign in many times, so turn off the admin login rate limit in that app
 
 ## License
 
-MIT
+[MIT](./LICENSE)

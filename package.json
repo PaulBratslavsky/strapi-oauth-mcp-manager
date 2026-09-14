@@ -12,13 +12,19 @@
     "chatgpt",
     "claude",
     "authentication",
-    "ai"
+    "ai",
+    "admin-token",
+    "pkce"
   ],
   "license": "MIT",
   "author": "Paul Bratslavsky <paul.bratslavsky@strapi.io>",
   "repository": {
     "type": "git",
     "url": "https://github.com/PaulBratslavsky/strapi-oauth-mcp-manager"
+  },
+  "homepage": "https://github.com/PaulBratslavsky/strapi-oauth-mcp-manager#readme",
+  "bugs": {
+    "url": "https://github.com/PaulBratslavsky/strapi-oauth-mcp-manager/issues"
   },
   "publishConfig": {
     "access": "public"
@@ -43,7 +49,9 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "strapi-plugin build",
@@ -56,8 +64,7 @@
   },
   "dependencies": {
     "@strapi/design-system": "^2.0.0-rc.30",
-    "@strapi/icons": "^2.0.0-rc.30",
-    "react-intl": "^8.0.10"
+    "@strapi/icons": "^2.0.0-rc.30"
   },
   "devDependencies": {
     "@strapi/strapi": "^5.53.0",
@@ -70,16 +77,17 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@strapi/typescript-utils": "^5.53.0",
-    "typescript": "^5.9.3",
-    "@strapi/utils": "^5.53.0"
+    "typescript": "^5.9.3"
   },
   "peerDependencies": {
     "@strapi/strapi": "^5.47.0",
-    "@strapi/sdk-plugin": "^5.4.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.30.2",
     "styled-components": "^6.1.19"
+  },
+  "engines": {
+    "node": ">=20.0.0 <=26.x.x"
   },
   "strapi": {
     "kind": "plugin",
