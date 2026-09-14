@@ -52,7 +52,7 @@
     "verify": "strapi-plugin verify",
     "test:ts:front": "run -T tsc -p admin/tsconfig.json",
     "test:ts:back": "run -T tsc -p server/tsconfig.json",
-    "test:e2e": "node test/e2e/oauth-flow.mjs && node test/e2e/admin-clients.mjs && node test/e2e/users.mjs"
+    "test:e2e": "node test/e2e/oauth-flow.mjs && node test/e2e/admin-clients.mjs && node test/e2e/users.mjs && node test/e2e/client-token.mjs"
   },
   "dependencies": {
     "@strapi/design-system": "^2.0.0-rc.30",

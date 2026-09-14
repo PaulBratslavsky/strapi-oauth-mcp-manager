@@ -38,15 +38,25 @@
     },
     "tokenEndpointAuthMethod": {
       "type": "enumeration",
-      "enum": ["client_secret_basic", "client_secret_post", "none"],
+      "enum": [
+        "client_secret_basic",
+        "client_secret_post",
+        "none"
+      ],
       "default": "client_secret_post",
       "required": true
     },
     "registrationType": {
       "type": "enumeration",
-      "enum": ["manual", "dynamic"],
+      "enum": [
+        "manual",
+        "dynamic"
+      ],
       "default": "manual",
       "required": true
+    },
+    "adminTokenId": {
+      "type": "integer"
     },
     "description": {
       "type": "text"

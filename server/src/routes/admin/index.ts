@@ -14,6 +14,7 @@ export default [
   adminRoute('GET', '/grants', 'admin.listGrants'),
   adminRoute('DELETE', '/grants/:id', 'admin.revokeGrant'),
   adminRoute('DELETE', '/users/:userId/grants', 'admin.revokeUserGrants'),
+  adminRoute('GET', '/tokens', 'admin.listTokens'),
   adminRoute('GET', '/clients', 'admin.listClients'),
   adminRoute('POST', '/clients', 'admin.createClient'),
   adminRoute('PUT', '/clients/:id', 'admin.updateClient'),

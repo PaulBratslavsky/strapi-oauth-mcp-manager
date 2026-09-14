@@ -10,6 +10,8 @@ import {
   IconButton,
   Modal,
   Radio,
+  SingleSelect,
+  SingleSelectOption,
   Switch,
   Table,
   Tbody,
@@ -48,6 +50,23 @@ interface Grant {
   refreshExpiresAt: string;
 }
 
+interface TokenOption {
+  id: number;
+  name: string;
+  description?: string | null;
+  expiresAt?: string | null;
+}
+
+interface MappedToken {
+  id: number;
+  name: string | null;
+  ownerId: number | null;
+  ownerEmail: string | null;
+  missing?: boolean;
+}
+
+const PICK_ON_CONNECT = 'pick';
+
 interface Client {
   id: number;
   name: string;
@@ -55,6 +74,7 @@ interface Client {
   redirectUris: string[];
   tokenEndpointAuthMethod: string;
   registrationType: 'manual' | 'dynamic';
+  adminToken: MappedToken | null;
   active: boolean;
   createdAt: string;
 }
@@ -107,13 +127,54 @@ const CopyValue = ({ label, value }: { label: string; value: string }) => {
   );
 };
 
-const CreateClientModal = ({ onCreated }: { onCreated: () => void }) => {
+/**
+ * Choose which admin token a client uses. Admins can only map tokens they own; a token owned by
+ * someone else is shown as the current value but can only be replaced or cleared.
+ */
+const TokenSelect = ({
+  tokens,
+  value,
+  current,
+  onChange,
+  disabled,
+}: {
+  tokens: TokenOption[];
+  value: string;
+  current?: MappedToken | null;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+}) => {
+  const ownsCurrent = current && tokens.some((t) => t.id === current.id);
+  return (
+    <SingleSelect
+      aria-label="Admin token"
+      value={value}
+      disabled={disabled}
+      onChange={(next: string | number) => onChange(String(next))}
+    >
+      <SingleSelectOption value={PICK_ON_CONNECT}>Picked when connecting</SingleSelectOption>
+      {current && !ownsCurrent && (
+        <SingleSelectOption value={String(current.id)} disabled>
+          {current.missing ? 'Deleted token' : `${current.name} (owned by ${current.ownerEmail ?? 'another admin'})`}
+        </SingleSelectOption>
+      )}
+      {tokens.map((token) => (
+        <SingleSelectOption key={token.id} value={String(token.id)}>
+          {token.name}
+        </SingleSelectOption>
+      ))}
+    </SingleSelect>
+  );
+};
+
+const CreateClientModal = ({ onCreated, tokens }: { onCreated: () => void; tokens: TokenOption[] }) => {
   const { post } = useFetchClient();
   const { toggleNotification } = useNotification();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [redirectUris, setRedirectUris] = useState('');
   const [confidential, setConfidential] = useState('confidential');
+  const [adminTokenId, setAdminTokenId] = useState(PICK_ON_CONNECT);
   const [created, setCreated] = useState<CreatedClient | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -121,6 +182,7 @@ const CreateClientModal = ({ onCreated }: { onCreated: () => void }) => {
     setName('');
     setRedirectUris('');
     setConfidential('confidential');
+    setAdminTokenId(PICK_ON_CONNECT);
     setCreated(null);
   };
 
@@ -131,6 +193,7 @@ const CreateClientModal = ({ onCreated }: { onCreated: () => void }) => {
         name,
         redirectUris: redirectUris.split('\n').map((uri) => uri.trim()).filter(Boolean),
         confidential: confidential === 'confidential',
+        adminTokenId: adminTokenId === PICK_ON_CONNECT ? null : Number(adminTokenId),
       });
       setCreated(data.data);
       onCreated();
@@ -184,6 +247,14 @@ const CreateClientModal = ({ onCreated }: { onCreated: () => void }) => {
                 />
                 <Field.Hint />
               </Field.Root>
+              <Field.Root
+                name="adminToken"
+                hint="Map one of your admin tokens so every connection uses it. Only you can then approve this client. Leave it to let each person pick one of their own tokens."
+              >
+                <Field.Label>Admin token</Field.Label>
+                <TokenSelect tokens={tokens} value={adminTokenId} onChange={setAdminTokenId} />
+                <Field.Hint />
+              </Field.Root>
               <Field.Root name="type">
                 <Field.Label>Client type</Field.Label>
                 <Radio.Group value={confidential} onValueChange={setConfidential} aria-label="Client type">
@@ -215,15 +286,18 @@ const HomePage = () => {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [grants, setGrants] = useState<Grant[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
+  const [tokens, setTokens] = useState<TokenOption[]>([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      const [o, g, c] = await Promise.all([
+      const [o, g, c, t] = await Promise.all([
         get<{ data: Overview }>(`/${PLUGIN_ID}/overview`),
         get<{ data: Grant[] }>(`/${PLUGIN_ID}/grants`),
         get<{ data: Client[] }>(`/${PLUGIN_ID}/clients`),
+        get<{ data: TokenOption[] }>(`/${PLUGIN_ID}/tokens`),
       ]);
+      setTokens(t.data.data);
       setOverview(o.data.data);
       setGrants(g.data.data);
       setClients(c.data.data);
@@ -242,8 +316,8 @@ const HomePage = () => {
     try {
       await action();
       toggleNotification({ type: 'success', message });
-    } catch {
-      toggleNotification({ type: 'danger', message: 'Something went wrong' });
+    } catch (error: any) {
+      toggleNotification({ type: 'danger', message: error?.response?.data?.error?.message ?? 'Something went wrong' });
     }
     load();
   };
@@ -354,17 +428,18 @@ const HomePage = () => {
           <Section
             title="OAuth clients"
             subtitle="Deactivating or deleting a client disconnects all of its sessions."
-            action={<CreateClientModal onCreated={load} />}
+            action={<CreateClientModal onCreated={load} tokens={tokens} />}
           >
             {clients.length === 0 ? (
               <EmptyStateLayout content="No clients yet. They appear here when an MCP client registers or you add one." />
             ) : (
-              <Table colCount={5} rowCount={clients.length + 1}>
+              <Table colCount={6} rowCount={clients.length + 1}>
                 <Thead>
                   <Tr>
                     <Th><Typography variant="sigma">Name</Typography></Th>
                     <Th><Typography variant="sigma">Type</Typography></Th>
                     <Th><Typography variant="sigma">Redirect URIs</Typography></Th>
+                    <Th><Typography variant="sigma">Admin token</Typography></Th>
                     <Th><Typography variant="sigma">Active</Typography></Th>
                     <Th><Typography variant="sigma">Actions</Typography></Th>
                   </Tr>
@@ -392,6 +467,26 @@ const HomePage = () => {
                         <Typography variant="pi" style={{ wordBreak: 'break-all' }}>
                           {client.redirectUris.join(', ')}
                         </Typography>
+                      </Td>
+                      <Td>
+                        <Box minWidth="220px">
+                          <TokenSelect
+                            tokens={tokens}
+                            current={client.adminToken}
+                            value={client.adminToken ? String(client.adminToken.id) : PICK_ON_CONNECT}
+                            onChange={(next) =>
+                              run(
+                                () =>
+                                  put(`/${PLUGIN_ID}/clients/${client.id}`, {
+                                    adminTokenId: next === PICK_ON_CONNECT ? null : Number(next),
+                                  }),
+                                next === PICK_ON_CONNECT
+                                  ? `${client.name} now lets each person pick a token`
+                                  : `${client.name} now uses the selected token`
+                              )
+                            }
+                          />
+                        </Box>
                       </Td>
                       <Td>
                         <Switch

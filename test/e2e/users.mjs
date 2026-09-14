@@ -1,6 +1,6 @@
 // Several admin users with different roles, each connecting with their own tokens,
 // and offboarding a user by deactivating their account.
-import { ADMIN_PASSWORD, BASE, adminSession, authorize, callTool, check, contentPermission, exchangeCode, finish, mcp, registerClient, pkce, toolNames } from './helpers.mjs';
+import { ADMIN_PASSWORD, BASE, adminSession, deleteClient, authorize, callTool, check, contentPermission, exchangeCode, finish, mcp, registerClient, pkce, toolNames } from './helpers.mjs';
 
 const REDIRECT = 'http://localhost:33418/callback';
 const PASSWORD = 'E2eUser123!';
@@ -98,5 +98,6 @@ await superAdmin.call('DELETE', `/admin/admin-tokens/${editorToken.id}`);
 for (const [id, permissions] of Object.entries(originalRolePermissions)) {
   await superAdmin.call('PUT', `/admin/roles/${id}/permissions`, { permissions });
 }
+await deleteClient(superAdmin, reg.client_id);
 void authorUser;
 finish();

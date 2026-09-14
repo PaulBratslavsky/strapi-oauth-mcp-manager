@@ -244,18 +244,43 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
         return sendHtml(ctx, 500, renderErrorPage('Strapi is missing admin.auth.secret.'));
       }
 
+      const mappedToken = await service().getMappedToken(client);
+
+      /**
+       * Checks for clients mapped to one admin token: the token must still exist, and only its
+       * owner may approve. Returns an error message, or null when the user may continue.
+       */
+      const mappedTokenError = (user: { id: number }) => {
+        if (!mappedToken) {
+          return null;
+        }
+        if (mappedToken.missing) {
+          return `The admin token for ${client.name} was deleted. Ask an admin to choose a new one on the MCP OAuth page.`;
+        }
+        if (mappedToken.ownerId !== user.id) {
+          return `${client.name} is set up to use an admin token that belongs to someone else. Only that token's owner can connect it.`;
+        }
+        return null;
+      };
+
       const showChooseAccess = async (user: { id: number; email: string }, ticket: string, status = 200, error?: string) => {
-        const tokens = await service().listSelectableTokens(user.id);
+        const ownTokens = await service().listSelectableTokens(user.id);
+        const tokens = mappedToken ? ownTokens.filter((t) => t.id === mappedToken.id) : ownTokens;
         sendHtml(
           ctx,
           status,
           renderChooseAccessPage({
             ...pageProps,
-            error,
+            error:
+              error ??
+              (mappedToken && tokens.length === 0
+                ? 'The admin token for this client has expired or can no longer be used. Ask an admin to choose a new one.'
+                : undefined),
             userEmail: user.email,
             ticket,
             tokens,
-            allowUserPermissions: config().allowUserPermissions,
+            fixedToken: Boolean(mappedToken) && tokens.length === 1,
+            allowUserPermissions: !mappedToken && config().allowUserPermissions,
             tokensSettingsUrl: `${getBaseUrl(ctx, strapi)}/admin/settings/admin-tokens`,
           }),
           csp
@@ -271,12 +296,20 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
           return sendHtml(ctx, 401, renderAuthorizePage({ ...pageProps, error: 'Your sign-in expired. Sign in again.' }), csp);
         }
 
+        const mappingError = mappedTokenError(user);
+        if (mappingError) {
+          return sendHtml(ctx, 403, renderAuthorizePage({ ...pageProps, error: mappingError }), csp);
+        }
+
         if (body.decision === 'refresh') {
           return showChooseAccess(user, body.ticket);
         }
 
         const access = str(body.access) ?? '';
         let adminTokenId: number | null = null;
+        if (mappedToken && access !== `token:${mappedToken.id}`) {
+          return showChooseAccess(user, body.ticket, 400, `${client.name} can only use its mapped admin token.`);
+        }
         if (access === 'user') {
           if (!config().allowUserPermissions) {
             return showChooseAccess(user, body.ticket, 400, 'Choose one of your admin tokens.');
@@ -328,6 +361,12 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
         return rerender(401, info?.message === 'User not active' ? 'This admin account is not active.' : 'Invalid email or password.');
       }
       loginFailures.delete(lockKey);
+
+      const mappingError = mappedTokenError(user);
+      if (mappingError) {
+        strapi.log.warn(`[${PLUGIN_ID}] ${user.email} cannot connect "${client.name}": ${mappingError}`);
+        return rerender(403, mappingError);
+      }
 
       return showChooseAccess(user, signConsentTicket(secret, user.id, binding));
     },

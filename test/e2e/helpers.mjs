@@ -126,3 +126,10 @@ export const contentPermission = (action) => ({
   subject: process.env.SUBJECT ?? ARTICLE,
   ...(['read', 'create', 'update'].includes(action) ? { properties: { fields: ARTICLE_FIELDS } } : {}),
 });
+
+/** Delete a client by its OAuth client_id so test runs don't leave registrations behind. */
+export const deleteClient = async (admin, clientId) => {
+  const clients = (await admin.call('GET', `/${PLUGIN}/clients`)).body.data;
+  const client = clients.find((c) => c.clientId === clientId);
+  if (client) await admin.call('DELETE', `/${PLUGIN}/clients/${client.id}`);
+};

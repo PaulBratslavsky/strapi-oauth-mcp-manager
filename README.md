@@ -99,6 +99,20 @@ Every connection runs on an **admin token owned by the person who approved it**.
 
 Different people can connect the same client with different access. An editor might connect with a publishing token, and an author with a draft-only token.
 
+### Map a token to a client
+
+To fix which token a client uses, map the token to the client:
+
+1. Create the token in **Settings → Admin Tokens**, for example "ChatGPT – read only".
+2. Open **MCP OAuth** in the sidebar. When you add a client, choose the token under **Admin token**. For an existing client, including one that registered itself, choose it in the client's **Admin token** column.
+
+A mapped client skips the picker. The consent page shows the mapped token, and every session uses it.
+
+- **Only the token's owner can connect a mapped client.** Anyone else who signs in gets "Only that token's owner can connect it", so a mapped client never gives someone more access than they already have.
+- **You can map only tokens you own.** A token owned by someone else shows in the column, but you can only replace it or clear it.
+- **Changing or clearing the mapping ends the client's existing sessions.** Choose **Picked when connecting** to go back to the picker.
+- **If the mapped token is deleted,** the client refuses to connect until you choose a new token. It doesn't fall back to the picker.
+
 ### Let users create tokens
 
 Super Admins can create admin tokens by default. For other roles, go to **Settings → Administration Panel → Roles**, open the role, and on the **Settings** tab enable **Admin Tokens** (access, create, read, update, regenerate, delete). Users only ever see and manage their own tokens.
@@ -119,6 +133,7 @@ To let users connect without creating a token, set `allowUserPermissions: true` 
 | The same, but keep the token's settings | **Regenerate** the token | All sessions on that token end |
 | One connection | Revoke the session on the **MCP OAuth** page | Only that session ends |
 | One app | Turn off or delete the client on the **MCP OAuth** page | All its sessions end, and it can't connect again while off |
+| One app's access level | Change the client's mapped token | Its sessions end; new ones use the new token |
 
 Revoking a session never deletes the admin token the user picked.
 
@@ -139,7 +154,8 @@ Every client needs only the MCP server URL: `https://your-strapi.com/mcp`.
 
 1. In Strapi, open **MCP OAuth** in the sidebar and choose **Add client**.
 2. Enter a name and the client's redirect URI, for example `https://chatgpt.com/connector_platform_oauth_redirect`.
-3. Copy the client ID and secret into the client. The secret is shown only once.
+3. Optionally choose an **Admin token** so this client always uses it (see [Map a token to a client](#map-a-token-to-a-client)).
+4. Copy the client ID and secret into the client. The secret is shown only once.
 
 ### Clients that can't do OAuth
 
@@ -222,7 +238,7 @@ The **MCP OAuth** admin page requires the **Manage MCP OAuth clients and grants*
 
 ## Security
 
-- Users can connect only with admin tokens they own. The choice is checked again when the code is exchanged.
+- Users can connect only with admin tokens they own, whether they pick one or a client is mapped to one. This is checked again when the code is exchanged.
 - Clients without a secret must use PKCE (S256). Clients with a secret must send it.
 - Self-registered clients may use only `https` redirect URIs, `http` on `localhost`, or native app schemes. Unused self-registered clients are removed after 30 days.
 - After 5 failed sign-in attempts, an IP address and email pair is locked for 15 minutes. The count is kept in memory on each server.
@@ -238,6 +254,8 @@ The **MCP OAuth** admin page requires the **Manage MCP OAuth clients and grants*
 | The client never opens a sign-in page | Run `curl -i -X POST https://your-strapi.com/mcp`. You should get `401` with a `WWW-Authenticate` header. If the header is missing, the plugin isn't enabled. |
 | "You don't have any admin tokens to connect with" | Create one in **Settings → Admin Tokens**, then choose **Refresh**. If you can't, ask an admin to enable **Admin Tokens** for your role. |
 | A token is missing from the consent page | Only your own, unexpired tokens are listed. Tokens created before `ENCRYPTION_KEY` was set can't be used; regenerate them. |
+| "Only that token's owner can connect it" | The client is mapped to someone else's token. Ask that person to connect, or change the client to **Picked when connecting**. |
+| "The admin token for … was deleted" | Choose a new token for the client on the **MCP OAuth** page. |
 | Sign-in page links use `http://` or the wrong host | Set `url` in `config/server.ts`, or `proxy: true` behind a reverse proxy. |
 | "The redirect URI is not registered for this client" | For clients added in the admin panel, the redirect URI must match exactly. `*` matches any run of characters except `/`. |
 | A client suddenly gets `401` | Its session was revoked, its token was deleted or regenerated, or the user was deactivated. Reconnect. |

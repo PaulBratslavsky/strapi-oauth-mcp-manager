@@ -1,7 +1,7 @@
 // The OAuth flow an MCP client runs: discovery, registration, consent with a token picker,
 // code exchange with PKCE, MCP calls, refresh rotation and revocation.
 import {
-  BASE, OAUTH, adminSession, authorize, callTool, check, contentPermission, exchangeCode, finish,
+  BASE, OAUTH, adminSession, deleteClient, authorize, callTool, check, contentPermission, exchangeCode, finish,
   initializeParams, mcp, pkce, refresh, registerClient, revoke, toolNames,
 } from './helpers.mjs';
 
@@ -106,4 +106,5 @@ const stillThere = await admin.call('GET', `/admin/admin-tokens/${readOnly.id}`)
 check('revoking a session does not delete the chosen admin token', stillThere.status === 200);
 
 await admin.call('DELETE', `/admin/admin-tokens/${readOnly.id}`);
+await deleteClient(admin, reg.body.client_id);
 finish();

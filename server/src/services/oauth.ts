@@ -35,6 +35,8 @@ export interface OAuthClient {
   redirectUris: string[];
   tokenEndpointAuthMethod: TokenEndpointAuthMethod;
   registrationType: 'manual' | 'dynamic';
+  /** When set, every session for this client uses this admin token, and only its owner can approve. */
+  adminTokenId?: number | null;
   active: boolean;
 }
 
@@ -303,6 +305,10 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         throw new OAuthError('invalid_grant', 'The authorizing admin user is no longer active');
       }
 
+      if (client.adminTokenId && codeRow.adminTokenId !== client.adminTokenId) {
+        throw new OAuthError('invalid_grant', 'The admin token for this client changed. Authorize again.');
+      }
+
       const ownsAdminToken = !codeRow.adminTokenId;
       if (ownsAdminToken && !config().allowUserPermissions) {
         throw new OAuthError('invalid_grant', 'Sessions must use an admin token');
@@ -433,6 +439,47 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       return true;
     },
 
+    /**
+     * The admin token mapped to a client, with its owner. `missing` means a token was mapped
+     * but has since been deleted, so the client must not connect until an admin fixes it.
+     */
+    async getMappedToken(client: OAuthClient): Promise<{ id: number; name: string; ownerId: number | null; missing: boolean } | null> {
+      if (!client.adminTokenId) {
+        return null;
+      }
+      const token = await strapi.db.query('admin::api-token').findOne({
+        where: { id: client.adminTokenId, kind: 'admin' },
+        select: ['id', 'name', 'description', 'expiresAt'],
+        populate: ['adminUserOwner'],
+      });
+      if (!token) {
+        return { id: client.adminTokenId, name: '', ownerId: null, missing: true };
+      }
+      return { id: token.id, name: token.name, ownerId: ownerIdOf(token), missing: false };
+    },
+
+    /**
+     * Map an admin token to a client, or clear the mapping with null. The acting admin must own
+     * the token. Existing sessions end because they may be using a different token.
+     */
+    async setClientToken(id: number, adminTokenId: number | null, actingUserId: number) {
+      const client = await strapi.db.query(UID.client).findOne({ where: { id } });
+      if (!client) {
+        return null;
+      }
+      if (adminTokenId !== null) {
+        const selectable = await this.listSelectableTokens(actingUserId);
+        if (!selectable.some((t) => t.id === adminTokenId)) {
+          throw new OAuthError('invalid_request', 'You can only map an admin token you own');
+        }
+      }
+      if ((client.adminTokenId ?? null) !== adminTokenId) {
+        await strapi.db.query(UID.client).update({ where: { id }, data: { adminTokenId } });
+        await this.revokeClientGrants(client.clientId);
+      }
+      return { id, adminTokenId };
+    },
+
     /** Drop sessions backed by an admin token that no longer exists (deleted in Settings or with its owner). */
     async removeGrantsForAdminToken(adminTokenId: number) {
       const { count } = await strapi.db.query(UID.grant).deleteMany({ where: { adminTokenId } });
@@ -499,14 +546,40 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
 
     async listClients() {
       const clients = await strapi.db.query(UID.client).findMany({
-        select: ['id', 'documentId', 'name', 'clientId', 'redirectUris', 'tokenEndpointAuthMethod', 'registrationType', 'active', 'createdAt'],
+        select: ['id', 'documentId', 'name', 'clientId', 'redirectUris', 'tokenEndpointAuthMethod', 'registrationType', 'adminTokenId', 'active', 'createdAt'],
         orderBy: { createdAt: 'desc' },
       });
-      return clients.map((c: any) => ({ ...c, redirectUris: normalizeRedirectUris(c.redirectUris) }));
+      const tokenIds = clients.map((c: any) => c.adminTokenId).filter(Boolean);
+      const tokens = tokenIds.length
+        ? await strapi.db.query('admin::api-token').findMany({
+            where: { id: { $in: tokenIds } },
+            select: ['id', 'name'],
+            populate: { adminUserOwner: { select: ['id', 'email'] } },
+          })
+        : [];
+      const tokensById = new Map(tokens.map((t: any) => [t.id, t]));
+      return clients.map((c: any) => {
+        const token: any = c.adminTokenId ? tokensById.get(c.adminTokenId) : null;
+        return {
+          ...c,
+          redirectUris: normalizeRedirectUris(c.redirectUris),
+          adminToken: c.adminTokenId
+            ? token
+              ? { id: token.id, name: token.name, ownerId: token.adminUserOwner?.id ?? null, ownerEmail: token.adminUserOwner?.email ?? null }
+              : { id: c.adminTokenId, name: null, ownerId: null, ownerEmail: null, missing: true }
+            : null,
+        };
+      });
     },
 
     /** Create a client from the admin panel. The secret is returned once and never shown again. */
-    async createClient(input: { name: string; redirectUris: string[]; confidential: boolean }) {
+    async createClient(input: { name: string; redirectUris: string[]; confidential: boolean; adminTokenId?: number | null; actingUserId: number }) {
+      if (input.adminTokenId) {
+        const selectable = await this.listSelectableTokens(input.actingUserId);
+        if (!selectable.some((t) => t.id === input.adminTokenId)) {
+          throw new OAuthError('invalid_request', 'You can only map an admin token you own');
+        }
+      }
       const clientId = generateToken(TOKEN_PREFIX.clientId, 16);
       const clientSecret = input.confidential ? generateToken(TOKEN_PREFIX.clientSecret) : null;
       const row = await strapi.db.query(UID.client).create({
@@ -517,6 +590,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
           redirectUris: input.redirectUris,
           tokenEndpointAuthMethod: input.confidential ? 'client_secret_post' : 'none',
           registrationType: 'manual',
+          adminTokenId: input.adminTokenId ?? null,
           active: true,
         },
       });

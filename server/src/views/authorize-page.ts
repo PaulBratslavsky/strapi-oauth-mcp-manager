@@ -73,6 +73,8 @@ export interface ChooseAccessPageProps extends BasePageProps {
   tokens: TokenOption[];
   allowUserPermissions: boolean;
   tokensSettingsUrl: string;
+  /** The client is mapped to this single token, so there is nothing to choose. */
+  fixedToken?: boolean;
 }
 
 const hiddenInputs = (params: Record<string, string | undefined>) =>
@@ -149,6 +151,19 @@ export const renderChooseAccessPage = (props: ChooseAccessPageProps) => {
       : []),
   ];
 
+  if (props.fixedToken && props.tokens[0]) {
+    const token = props.tokens[0];
+    options.splice(
+      0,
+      options.length,
+      `<input type="hidden" name="access" value="token:${token.id}">
+      <div class="option">
+        <span><strong>${escapeHtml(token.name)}</strong>
+        <small>${escapeHtml(token.description || 'Admin token')} · ${escapeHtml(formatExpiry(token.expiresAt))}</small></span>
+      </div>`
+    );
+  }
+
   const body =
     options.length === 0
       ? `<div class="error" role="alert">You don't have any admin tokens to connect with.</div>
@@ -158,10 +173,14 @@ export const renderChooseAccessPage = (props: ChooseAccessPageProps) => {
            <button type="submit" name="decision" value="refresh" class="primary" formnovalidate>Refresh</button>
          </div>`
       : `<fieldset>
-           <legend>Choose what ${escapeHtml(props.clientName)} can access</legend>
+           <legend>${
+             props.fixedToken
+               ? `${escapeHtml(props.clientName)} is set up to use this admin token`
+               : `Choose what ${escapeHtml(props.clientName)} can access`
+           }</legend>
            ${options.join('')}
          </fieldset>
-         <p class="warning">The client gets exactly the permissions of the token you choose. Revoke access any time on the MCP OAuth page, or by deleting or regenerating the token.</p>
+         <p class="warning">The client gets exactly the permissions of ${props.fixedToken ? 'this token' : 'the token you choose'}. Revoke access any time on the MCP OAuth page, or by deleting or regenerating the token.</p>
          ${dynamicWarning(props)}
          <div class="actions">
            <button type="submit" name="decision" value="deny" formnovalidate>Deny</button>

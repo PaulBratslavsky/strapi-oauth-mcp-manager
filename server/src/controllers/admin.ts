@@ -1,7 +1,7 @@
 import type { Core } from '@strapi/strapi';
 import { PLUGIN_ID } from '../pluginId';
 import type { PluginConfig } from '../config';
-import type { OAuthService } from '../services/oauth';
+import { OAuthError, type OAuthService } from '../services/oauth';
 import { getEndpoints, normalizeRedirectUris } from '../utils/url';
 
 const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
@@ -65,20 +65,64 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
       if (invalid) {
         return ctx.badRequest(`Invalid redirect URI: ${invalid}`);
       }
-      ctx.status = 201;
-      ctx.body = { data: await service().createClient({ name, redirectUris, confidential: body.confidential !== false }) };
+      const adminTokenId = body.adminTokenId ? Number(body.adminTokenId) : null;
+      try {
+        ctx.status = 201;
+        ctx.body = {
+          data: await service().createClient({
+            name,
+            redirectUris,
+            confidential: body.confidential !== false,
+            adminTokenId,
+            actingUserId: ctx.state.user.id,
+          }),
+        };
+      } catch (error) {
+        if (error instanceof OAuthError) {
+          return ctx.badRequest(error.description);
+        }
+        throw error;
+      }
+    },
+
+    /** Tokens the signed-in admin can map to a client: their own unexpired admin tokens. */
+    async listTokens(ctx: any) {
+      ctx.body = { data: await service().listSelectableTokens(ctx.state.user.id) };
     },
 
     async updateClient(ctx: any) {
-      const active = ctx.request.body?.active;
-      if (typeof active !== 'boolean') {
-        return ctx.badRequest('active must be a boolean');
+      const body = ctx.request.body ?? {};
+      const id = Number(ctx.params.id);
+      const result: Record<string, unknown> = { id };
+
+      if ('adminTokenId' in body) {
+        const adminTokenId = body.adminTokenId === null || body.adminTokenId === '' ? null : Number(body.adminTokenId);
+        try {
+          const updated = await service().setClientToken(id, adminTokenId, ctx.state.user.id);
+          if (!updated) {
+            return ctx.notFound('Client not found');
+          }
+          result.adminTokenId = updated.adminTokenId;
+        } catch (error) {
+          if (error instanceof OAuthError) {
+            return ctx.badRequest(error.description);
+          }
+          throw error;
+        }
       }
-      const client = await service().setClientActive(Number(ctx.params.id), active);
-      if (!client) {
-        return ctx.notFound('Client not found');
+
+      if ('active' in body) {
+        if (typeof body.active !== 'boolean') {
+          return ctx.badRequest('active must be a boolean');
+        }
+        const client = await service().setClientActive(id, body.active);
+        if (!client) {
+          return ctx.notFound('Client not found');
+        }
+        result.active = client.active;
       }
-      ctx.body = { data: { id: client.id, active: client.active } };
+
+      ctx.body = { data: result };
     },
 
     async deleteClient(ctx: any) {
