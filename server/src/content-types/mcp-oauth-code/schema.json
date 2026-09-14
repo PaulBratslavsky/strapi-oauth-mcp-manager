@@ -5,7 +5,7 @@
     "singularName": "mcp-oauth-code",
     "pluralName": "mcp-oauth-codes",
     "displayName": "MCP OAuth Code",
-    "description": "OAuth 2.0 authorization codes"
+    "description": "Short-lived OAuth authorization codes"
   },
   "options": {
     "draftAndPublish": false
@@ -19,17 +19,22 @@
     }
   },
   "attributes": {
-    "code": {
+    "codeHash": {
       "type": "string",
       "required": true,
-      "unique": true
+      "unique": true,
+      "private": true
     },
     "clientId": {
       "type": "string",
       "required": true
     },
+    "adminUserId": {
+      "type": "integer",
+      "required": true
+    },
     "redirectUri": {
-      "type": "string",
+      "type": "text",
       "required": true
     },
     "codeChallenge": {
@@ -38,13 +43,15 @@
     "codeChallengeMethod": {
       "type": "string"
     },
+    "scope": {
+      "type": "string"
+    },
+    "resource": {
+      "type": "string"
+    },
     "expiresAt": {
       "type": "datetime",
       "required": true
-    },
-    "used": {
-      "type": "boolean",
-      "default": false
     }
   }
 }

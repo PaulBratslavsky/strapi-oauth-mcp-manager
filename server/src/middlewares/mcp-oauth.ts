@@ -1,151 +1,77 @@
 /**
- * MCP OAuth Authentication Middleware
+ * MCP OAuth gate
  *
- * This middleware provides OAuth 2.0 authentication for all MCP endpoints.
- * Uses convention-based protection: any route matching /api/{plugin}/mcp is protected.
+ * Sits in front of core's POST /mcp handler, which only understands admin API tokens
+ * and answers 401 without telling the client where to log in.
  *
- * It supports dual authentication:
- * - OAuth 2.0 tokens (for ChatGPT and other OAuth clients)
- * - Direct Strapi API tokens (for Claude Desktop and scripts)
- *
- * On success: Sets ctx.state.strapiToken for use in controllers
- * On failure: Returns 401 with WWW-Authenticate header for OAuth discovery
+ * - No bearer token: 401 with a WWW-Authenticate header pointing at the protected
+ *   resource metadata, so MCP clients can start the OAuth flow (RFC 9728).
+ * - An OAuth access token issued by this plugin: swap it for the admin API token
+ *   behind the grant, then let core authenticate the request as usual.
+ * - Anything else (for example an admin API token pasted into a client config):
+ *   passed through untouched.
  */
 
 import type { Core } from '@strapi/strapi';
 import { PLUGIN_ID } from '../pluginId';
+import type { OAuthService } from '../services/oauth';
+import { TOKEN_PREFIX } from '../utils/crypto';
+import { MCP_PATH, getEndpoints } from '../utils/url';
 
-const PLUGIN_UID = `plugin::${PLUGIN_ID}` as const;
+const extractBearerToken = (header: string | undefined) => {
+  const match = header?.match(/^Bearer\s+(\S+)$/i);
+  return match ? match[1] : null;
+};
 
-/**
- * Convention-based MCP endpoint pattern.
- * Matches: /api/{plugin-name}/mcp or /api/{plugin-name}/mcp/...
- */
-const MCP_ENDPOINT_PATTERN = /^\/api\/[^/]+\/mcp(\/.*)?$/;
+const unauthorized = (ctx: any, strapi: Core.Strapi, error?: { code: string; description: string }) => {
+  const { protectedResourceMetadata } = getEndpoints(ctx, strapi);
+  const params = [
+    ...(error ? [`error="${error.code}"`, `error_description="${error.description}"`] : []),
+    `resource_metadata="${protectedResourceMetadata}"`,
+  ];
+  ctx.status = 401;
+  ctx.set('WWW-Authenticate', `Bearer ${params.join(', ')}`);
+  // Same JSON-RPC shape core uses for its own auth failures.
+  ctx.body = { jsonrpc: '2.0', error: { code: -32000, message: 'Authentication required' }, id: null };
+};
 
-/**
- * Extract bearer token from Authorization header
- */
-function extractBearerToken(authHeader: string | undefined): string | null {
-  if (!authHeader?.startsWith('Bearer ')) {
-    return null;
-  }
-  return authHeader.slice(7);
-}
-
-/**
- * Build the base URL from request headers (supports ngrok/proxies)
- */
-function getBaseUrl(ctx: any, strapi: Core.Strapi): string {
-  const forwardedProto = ctx.request.headers['x-forwarded-proto'] || ctx.protocol;
-  const forwardedHost = ctx.request.headers['x-forwarded-host'] || ctx.request.headers['host'];
-  const serverUrl = (strapi.config.get('server.url') as string) || 'http://localhost:1337';
-  return forwardedHost ? `${forwardedProto}://${forwardedHost}` : serverUrl;
-}
-
-/**
- * Build WWW-Authenticate header value for OAuth discovery
- */
-function buildWwwAuthenticateHeader(ctx: any, strapi: Core.Strapi): string {
-  const baseUrl = getBaseUrl(ctx, strapi);
-  const resourceMetadataUrl = `${baseUrl}/api/${PLUGIN_ID}/.well-known/oauth-protected-resource`;
-  return `Bearer resource_metadata="${resourceMetadataUrl}"`;
-}
-
-interface TokenValidationResult {
-  valid: boolean;
-  strapiApiToken?: string;
-  error?: string;
-}
-
-/**
- * Validate OAuth access token and return linked Strapi API token
- */
-async function validateOAuthToken(
-  token: string,
-  strapi: Core.Strapi
-): Promise<TokenValidationResult> {
-  try {
-    // Find the token record
-    const tokenRecord = await strapi.documents(`${PLUGIN_UID}.mcp-oauth-token`).findFirst({
-      filters: { accessToken: token, revoked: false },
-    });
-
-    if (!tokenRecord) {
-      return { valid: false };
-    }
-
-    // Check expiration
-    if (new Date(tokenRecord.expiresAt as string) < new Date()) {
-      return { valid: false, error: 'Token expired' };
-    }
-
-    // Get the linked OAuth client to find the Strapi API token
-    const client = await strapi.documents(`${PLUGIN_UID}.mcp-oauth-client`).findFirst({
-      filters: { clientId: tokenRecord.clientId as string },
-    });
-
-    if (!client) {
-      return { valid: false, error: 'Client not found' };
-    }
-
-    return {
-      valid: true,
-      strapiApiToken: client.strapiApiToken as string,
-    };
-  } catch (error) {
-    strapi.log.error(`[${PLUGIN_ID}] Error validating OAuth token`, { error });
-    return { valid: false, error: 'Token validation failed' };
-  }
-}
-
-/**
- * Check if path is a protected MCP endpoint using convention-based pattern.
- * Any route matching /api/{plugin}/mcp is automatically protected.
- */
-function isMcpEndpoint(path: string): boolean {
-  return MCP_ENDPOINT_PATTERN.test(path);
-}
-
-/**
- * MCP OAuth Authentication Middleware Factory
- */
-const mcpOauthMiddleware = (config: any, { strapi }: { strapi: Core.Strapi }) => {
+const mcpOauthMiddleware = (_config: unknown, { strapi }: { strapi: Core.Strapi }) => {
   return async (ctx: any, next: () => Promise<void>) => {
-    // Convention-based protection: any /api/*/mcp route is protected
-    if (!isMcpEndpoint(ctx.path)) {
+    if (ctx.path !== MCP_PATH || ctx.method !== 'POST') {
       return next();
     }
 
-    strapi.log.debug(`[${PLUGIN_ID}] Protecting MCP endpoint: ${ctx.path}`);
-
-    const authHeader = ctx.request.headers.authorization;
-    const token = extractBearerToken(authHeader);
-
-    // No token provided - return 401 with OAuth discovery header
+    const token = extractBearerToken(ctx.request.headers.authorization);
     if (!token) {
-      ctx.status = 401;
-      ctx.set('WWW-Authenticate', buildWwwAuthenticateHeader(ctx, strapi));
-      ctx.body = {
-        error: 'Unauthorized',
-        message: 'No authorization token provided',
-      };
+      return unauthorized(ctx, strapi);
+    }
+
+    if (!token.startsWith(TOKEN_PREFIX.accessToken)) {
+      return next();
+    }
+
+    const service: OAuthService = strapi.plugin(PLUGIN_ID).service('oauth');
+    let result;
+    try {
+      result = await service.resolveAccessToken(token);
+    } catch (error) {
+      strapi.log.error(`[${PLUGIN_ID}] Failed to resolve MCP access token: ${(error as Error).stack}`);
+      ctx.status = 500;
+      ctx.body = { jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null };
       return;
     }
 
-    // Try OAuth token validation first
-    const oauthResult = await validateOAuthToken(token, strapi);
-
-    if (oauthResult.valid && oauthResult.strapiApiToken) {
-      // OAuth token is valid - store the linked Strapi token
-      ctx.state.strapiToken = oauthResult.strapiApiToken;
-      ctx.state.authMethod = 'oauth';
-      return next();
+    if (!result.valid) {
+      strapi.log.debug(`[${PLUGIN_ID}] Rejected MCP access token: ${result.reason}`);
+      return unauthorized(ctx, strapi, {
+        code: 'invalid_token',
+        description: result.reason === 'token_expired' ? 'The access token expired' : 'The access token is invalid',
+      });
     }
 
-    // If not a valid OAuth token, assume it's a direct Strapi API token
-    ctx.state.strapiToken = token;
-    ctx.state.authMethod = 'api-token';
+    // Core reads ctx.request.header.authorization, which is the same object as req.headers.
+    ctx.request.headers.authorization = `Bearer ${result.adminAccessKey}`;
+    ctx.state.mcpOAuthGrantId = result.grantId;
     return next();
   };
 };

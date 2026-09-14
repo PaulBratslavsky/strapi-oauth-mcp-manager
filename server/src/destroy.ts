@@ -1,7 +1,7 @@
-import type { Core } from '@strapi/strapi';
+import { stopCleanup } from './bootstrap';
 
-const destroy = ({ strapi }: { strapi: Core.Strapi }) => {
-  // destroy phase
+const destroy = () => {
+  stopCleanup();
 };
 
 export default destroy;

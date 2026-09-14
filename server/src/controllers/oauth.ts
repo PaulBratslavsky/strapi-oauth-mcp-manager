@@ -1,343 +1,370 @@
 /**
- * OAuth 2.0 Controller
+ * OAuth 2.1 controller
  *
- * Handles OAuth authorization, token exchange, and discovery endpoints.
+ * Discovery (RFC 9728, RFC 8414), authorization with a Strapi admin login,
+ * token exchange with PKCE, dynamic client registration (RFC 7591), and
+ * token revocation (RFC 7009).
  */
 
 import type { Core } from '@strapi/strapi';
-import { randomBytes } from 'node:crypto';
 import { PLUGIN_ID } from '../pluginId';
+import type { PluginConfig } from '../config';
+import { OAuthError, type OAuthClient, type OAuthService, type TokenEndpointAuthMethod } from '../services/oauth';
+import { getEndpoints, isAllowedRegisteredRedirectUri, matchRedirectUri } from '../utils/url';
+import { renderAuthorizePage, renderErrorPage } from '../views/authorize-page';
 
-const PLUGIN_UID = `plugin::${PLUGIN_ID}` as const;
+const AUTH_METHODS: TokenEndpointAuthMethod[] = ['client_secret_basic', 'client_secret_post', 'none'];
 
-/**
- * Build the base URL from request headers (supports ngrok/proxies)
- */
-function getBaseUrl(ctx: any, strapi: Core.Strapi): string {
-  const forwardedProto = ctx.request.headers['x-forwarded-proto'] || ctx.protocol;
-  const forwardedHost = ctx.request.headers['x-forwarded-host'] || ctx.request.headers['host'];
-  const serverUrl = (strapi.config.get('server.url') as string) || 'http://localhost:1337';
-  return forwardedHost ? `${forwardedProto}://${forwardedHost}` : serverUrl;
-}
+// Simple in-memory brute-force guard for the login form: 5 failures per IP+email per 15 minutes.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 5;
+const loginFailures = new Map<string, { count: number; resetAt: number }>();
 
-/**
- * Match redirect URI against allowed patterns.
- * Supports wildcard (*) matching for patterns like "g-*" to match "g-abc123".
- */
-function matchRedirectUri(redirectUri: string, allowedPatterns: string[]): boolean {
-  return allowedPatterns.some((pattern) => {
-    // Escape regex special chars except *, then convert * to match non-slash chars
-    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
-    const regexPattern = escaped.replace(/\*/g, '[^/]*');
-    const regex = new RegExp('^' + regexPattern + '$');
-    return regex.test(redirectUri);
-  });
-}
+const isLoginLocked = (key: string) => {
+  const entry = loginFailures.get(key);
+  if (!entry || entry.resetAt < Date.now()) {
+    loginFailures.delete(key);
+    return false;
+  }
+  return entry.count >= LOGIN_MAX_FAILURES;
+};
 
-const oauthController = ({ strapi }: { strapi: Core.Strapi }) => ({
-  /**
-   * OAuth 2.0 Authorization Server Metadata (RFC 8414)
-   * GET /.well-known/oauth-authorization-server
-   */
-  async discovery(ctx: any) {
-    const baseUrl = getBaseUrl(ctx, strapi);
-    const pluginPath = `/api/${PLUGIN_ID}`;
-    const issuer = `${baseUrl}${pluginPath}`;
+const recordLoginFailure = (key: string) => {
+  const entry = loginFailures.get(key);
+  if (!entry || entry.resetAt < Date.now()) {
+    loginFailures.set(key, { count: 1, resetAt: Date.now() + LOGIN_WINDOW_MS });
+  } else {
+    entry.count += 1;
+  }
+};
 
-    ctx.body = {
-      issuer,
-      authorization_endpoint: `${baseUrl}${pluginPath}/oauth/authorize`,
-      token_endpoint: `${baseUrl}${pluginPath}/oauth/token`,
-      response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
-      token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic'],
-      code_challenge_methods_supported: ['S256'],
-    };
-  },
+const str = (value: unknown) => (typeof value === 'string' ? value : undefined);
 
-  /**
-   * OAuth 2.0 Protected Resource Metadata (RFC 9728)
-   * GET /.well-known/oauth-protected-resource
-   *
-   * Convention-based protection: all /api/{plugin}/mcp endpoints are protected.
-   */
-  async protectedResource(ctx: any) {
-    const baseUrl = getBaseUrl(ctx, strapi);
-    const pluginPath = `/api/${PLUGIN_ID}`;
-    const authServer = `${baseUrl}${pluginPath}`;
-
-    // Convention-based: any /api/*/mcp endpoint is protected
-    // Return the base API URL - clients should use the specific MCP endpoint they need
-    ctx.body = {
-      resource: `${baseUrl}/api`,
-      authorization_servers: [authServer],
-      bearer_methods_supported: ['header'],
-    };
-  },
-
-  /**
-   * OAuth 2.0 Authorization Endpoint
-   * GET /oauth/authorize
-   */
-  async authorize(ctx: any) {
-    const { client_id, redirect_uri, response_type, state, code_challenge, code_challenge_method } = ctx.query;
-
-    // Validate required parameters
-    if (!client_id) {
-      ctx.status = 400;
-      ctx.body = { error: 'invalid_request', error_description: 'client_id is required' };
-      return;
+const sendOAuthError = (ctx: any, error: unknown, strapi: Core.Strapi) => {
+  if (error instanceof OAuthError) {
+    ctx.status = error.status;
+    if (error.status === 401) {
+      ctx.set('WWW-Authenticate', 'Basic realm="strapi-mcp-oauth"');
     }
+    ctx.body = error.toJSON();
+    return;
+  }
+  strapi.log.error(`[${PLUGIN_ID}] OAuth request failed: ${(error as Error)?.stack ?? error}`);
+  ctx.status = 500;
+  ctx.body = { error: 'server_error', error_description: 'Unexpected server error' };
+};
 
-    if (!redirect_uri) {
-      ctx.status = 400;
-      ctx.body = { error: 'invalid_request', error_description: 'redirect_uri is required' };
-      return;
+/** Client credentials from HTTP Basic (RFC 6749 §2.3.1) or the form body. */
+const readClientCredentials = (ctx: any) => {
+  const body = ctx.request.body ?? {};
+  const header: string | undefined = ctx.request.headers.authorization;
+  if (header?.startsWith('Basic ')) {
+    const decoded = Buffer.from(header.slice(6), 'base64').toString();
+    const separator = decoded.indexOf(':');
+    if (separator > -1) {
+      return {
+        clientId: decodeURIComponent(decoded.slice(0, separator)),
+        clientSecret: decodeURIComponent(decoded.slice(separator + 1)),
+      };
     }
+  }
+  return { clientId: str(body.client_id), clientSecret: str(body.client_secret) };
+};
 
-    if (response_type !== 'code') {
-      ctx.status = 400;
-      ctx.body = { error: 'unsupported_response_type', error_description: 'Only code response type is supported' };
-      return;
+const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
+  const service = (): OAuthService => strapi.plugin(PLUGIN_ID).service('oauth');
+  const config = (): PluginConfig => strapi.config.get(`plugin::${PLUGIN_ID}`) as PluginConfig;
+
+  const sendHtml = (ctx: any, status: number, html: string, formTarget?: string) => {
+    ctx.status = status;
+    ctx.type = 'html';
+    ctx.set('Cache-Control', 'no-store');
+    ctx.set('X-Frame-Options', 'DENY');
+    // Browsers apply form-action to the redirect that follows a form POST, so the
+    // client's redirect origin must be allowed or the final hop is blocked.
+    ctx.set(
+      'Content-Security-Policy',
+      `default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'${
+        formTarget ? ` ${formTarget}` : ''
+      }`
+    );
+    ctx.body = html;
+  };
+
+  const redirectOriginForCsp = (redirectUri: string) => {
+    try {
+      const url = new URL(redirectUri);
+      return url.origin !== 'null' ? url.origin : url.protocol;
+    } catch {
+      return undefined;
     }
+  };
 
-    // Find the OAuth client
-    const client = await strapi.documents(`${PLUGIN_UID}.mcp-oauth-client`).findFirst({
-      filters: { clientId: client_id, active: true },
-    });
-
-    if (!client) {
-      ctx.status = 400;
-      ctx.body = { error: 'invalid_client', error_description: 'Unknown client_id' };
-      return;
-    }
-
-    // Validate redirect_uri (supports wildcard patterns like g-*)
-    // Handle both array and string storage of redirectUris
-    let allowedRedirects: string[] = [];
-    if (Array.isArray(client.redirectUris)) {
-      allowedRedirects = client.redirectUris;
-    } else if (typeof client.redirectUris === 'string') {
-      try {
-        allowedRedirects = JSON.parse(client.redirectUris);
-      } catch {
-        allowedRedirects = [client.redirectUris];
+  const redirectWith = (ctx: any, redirectUri: string, params: Record<string, string | undefined>) => {
+    const url = new URL(redirectUri);
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) {
+        url.searchParams.set(key, value);
       }
     }
-
-    strapi.log.debug(`[${PLUGIN_ID}] Checking redirect_uri: ${redirect_uri}`);
-    strapi.log.debug(`[${PLUGIN_ID}] Allowed redirects (${typeof client.redirectUris}): ${JSON.stringify(allowedRedirects)}`);
-
-    if (!matchRedirectUri(redirect_uri, allowedRedirects)) {
-      strapi.log.warn(`[${PLUGIN_ID}] Invalid redirect_uri: ${redirect_uri}`);
-      strapi.log.warn(`[${PLUGIN_ID}] Allowed patterns: ${allowedRedirects.join(', ')}`);
-      ctx.status = 400;
-      ctx.body = { error: 'invalid_request', error_description: 'Invalid redirect_uri' };
-      return;
-    }
-
-    // Generate authorization code
-    const code = randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-    // Store the authorization code
-    await strapi.documents(`${PLUGIN_UID}.mcp-oauth-code`).create({
-      data: {
-        code,
-        clientId: client_id,
-        redirectUri: redirect_uri,
-        codeChallenge: code_challenge || null,
-        codeChallengeMethod: code_challenge_method || null,
-        expiresAt: expiresAt.toISOString(),
-        used: false,
-      },
-    });
-
-    // Redirect back with the authorization code
-    const redirectUrl = new URL(redirect_uri);
-    redirectUrl.searchParams.set('code', code);
-    if (state) {
-      redirectUrl.searchParams.set('state', state);
-    }
-
-    ctx.redirect(redirectUrl.toString());
-  },
+    ctx.redirect(url.toString());
+  };
 
   /**
-   * OAuth 2.0 Token Endpoint
-   * POST /oauth/token
+   * Validate an authorization request. Returns the client, or renders an error
+   * page itself when the client or redirect URI can't be trusted (never redirect then).
    */
-  async token(ctx: any) {
-    const { grant_type, code, redirect_uri, client_id, client_secret, refresh_token } = ctx.request.body;
+  const validateAuthorizationRequest = async (ctx: any, input: Record<string, any>) => {
+    const clientId = str(input.client_id);
+    const redirectUri = str(input.redirect_uri);
 
-    // Also check for Basic auth header
-    let authClientId = client_id;
-    let authClientSecret = client_secret;
-
-    const authHeader = ctx.request.headers.authorization;
-    if (authHeader && authHeader.startsWith('Basic ')) {
-      const credentials = Buffer.from(authHeader.slice(6), 'base64').toString();
-      const [id, secret] = credentials.split(':');
-      authClientId = authClientId || id;
-      authClientSecret = authClientSecret || secret;
+    const client = clientId ? await service().findClient(clientId) : null;
+    if (!client) {
+      sendHtml(ctx, 400, renderErrorPage('Unknown or inactive client. The client may need to register again.'));
+      return null;
+    }
+    if (!redirectUri || !matchRedirectUri(redirectUri, client.redirectUris)) {
+      strapi.log.warn(`[${PLUGIN_ID}] Rejected redirect_uri "${redirectUri}" for client ${client.clientId}`);
+      sendHtml(ctx, 400, renderErrorPage('The redirect URI is not registered for this client.'));
+      return null;
     }
 
-    if (!authClientId) {
-      ctx.status = 401;
-      ctx.body = { error: 'invalid_client', error_description: 'Client authentication required' };
-      return;
+    const state = str(input.state);
+    const fail = (error: string, description: string) => {
+      redirectWith(ctx, redirectUri, { error, error_description: description, state });
+      return null;
+    };
+
+    if (input.response_type !== 'code') {
+      return fail('unsupported_response_type', 'Only response_type=code is supported');
+    }
+    const codeChallenge = str(input.code_challenge);
+    const method = str(input.code_challenge_method) ?? (codeChallenge ? 'S256' : undefined);
+    if (codeChallenge && method !== 'S256') {
+      return fail('invalid_request', 'Only the S256 code_challenge_method is supported');
+    }
+    if (!codeChallenge && client.tokenEndpointAuthMethod === 'none') {
+      return fail('invalid_request', 'code_challenge is required for public clients');
     }
 
-    // Verify client credentials
-    const client = await strapi.documents(`${PLUGIN_UID}.mcp-oauth-client`).findFirst({
-      filters: { clientId: authClientId, active: true },
-    });
+    return { client, redirectUri, state, codeChallenge, codeChallengeMethod: method };
+  };
 
-    if (!client || (authClientSecret && client.clientSecret !== authClientSecret)) {
-      ctx.status = 401;
-      ctx.body = { error: 'invalid_client', error_description: 'Invalid client credentials' };
-      return;
-    }
-
-    if (grant_type === 'authorization_code') {
-      await handleAuthorizationCodeGrant(ctx, strapi, client, code, redirect_uri);
-    } else if (grant_type === 'refresh_token') {
-      await handleRefreshTokenGrant(ctx, strapi, client, refresh_token);
-    } else {
-      ctx.status = 400;
-      ctx.body = { error: 'unsupported_grant_type', error_description: 'Unsupported grant type' };
-    }
-  },
-});
-
-async function handleAuthorizationCodeGrant(
-  ctx: any,
-  strapi: Core.Strapi,
-  client: any,
-  code: string,
-  redirect_uri: string
-) {
-  if (!code) {
-    ctx.status = 400;
-    ctx.body = { error: 'invalid_request', error_description: 'code is required' };
-    return;
-  }
-
-  // Find and validate the authorization code
-  const authCode = await strapi.documents(`${PLUGIN_UID}.mcp-oauth-code`).findFirst({
-    filters: { code, clientId: client.clientId, used: false },
-  });
-
-  if (!authCode) {
-    ctx.status = 400;
-    ctx.body = { error: 'invalid_grant', error_description: 'Invalid authorization code' };
-    return;
-  }
-
-  // Check expiration
-  if (new Date(authCode.expiresAt as string) < new Date()) {
-    ctx.status = 400;
-    ctx.body = { error: 'invalid_grant', error_description: 'Authorization code expired' };
-    return;
-  }
-
-  // Check redirect_uri matches
-  if (authCode.redirectUri !== redirect_uri) {
-    ctx.status = 400;
-    ctx.body = { error: 'invalid_grant', error_description: 'redirect_uri mismatch' };
-    return;
-  }
-
-  // Mark code as used
-  await strapi.documents(`${PLUGIN_UID}.mcp-oauth-code`).update({
-    documentId: authCode.documentId,
-    data: { used: true } as any,
-  });
-
-  // Generate tokens
-  const accessToken = randomBytes(32).toString('hex');
-  const refreshToken = randomBytes(32).toString('hex');
-  const expiresIn = 3600; // 1 hour
-  const refreshExpiresIn = 30 * 24 * 3600; // 30 days
-
-  await strapi.documents(`${PLUGIN_UID}.mcp-oauth-token`).create({
-    data: {
-      accessToken,
-      refreshToken,
-      clientId: client.clientId,
-      expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
-      refreshExpiresAt: new Date(Date.now() + refreshExpiresIn * 1000).toISOString(),
-      revoked: false,
+  const authorizePageProps = (ctx: any, client: OAuthClient, input: Record<string, any>) => ({
+    clientName: client.name,
+    redirectUri: input.redirect_uri,
+    registrationType: client.registrationType,
+    resource: str(input.resource) ?? getEndpoints(ctx, strapi).resource,
+    params: {
+      response_type: 'code',
+      client_id: str(input.client_id),
+      redirect_uri: str(input.redirect_uri),
+      state: str(input.state),
+      code_challenge: str(input.code_challenge),
+      code_challenge_method: str(input.code_challenge_method),
+      scope: str(input.scope),
+      resource: str(input.resource),
     },
   });
 
-  ctx.body = {
-    access_token: accessToken,
-    token_type: 'Bearer',
-    expires_in: expiresIn,
-    refresh_token: refreshToken,
-  };
-}
-
-async function handleRefreshTokenGrant(
-  ctx: any,
-  strapi: Core.Strapi,
-  client: any,
-  refreshToken: string
-) {
-  if (!refreshToken) {
-    ctx.status = 400;
-    ctx.body = { error: 'invalid_request', error_description: 'refresh_token is required' };
-    return;
-  }
-
-  // Find the token
-  const token = await strapi.documents(`${PLUGIN_UID}.mcp-oauth-token`).findFirst({
-    filters: { refreshToken, clientId: client.clientId, revoked: false },
-  });
-
-  if (!token) {
-    ctx.status = 400;
-    ctx.body = { error: 'invalid_grant', error_description: 'Invalid refresh token' };
-    return;
-  }
-
-  // Check refresh token expiration
-  if (new Date(token.refreshExpiresAt as string) < new Date()) {
-    ctx.status = 400;
-    ctx.body = { error: 'invalid_grant', error_description: 'Refresh token expired' };
-    return;
-  }
-
-  // Revoke old token
-  await strapi.documents(`${PLUGIN_UID}.mcp-oauth-token`).update({
-    documentId: token.documentId,
-    data: { revoked: true } as any,
-  });
-
-  // Generate new tokens
-  const newAccessToken = randomBytes(32).toString('hex');
-  const newRefreshToken = randomBytes(32).toString('hex');
-  const expiresIn = 3600;
-  const refreshExpiresIn = 30 * 24 * 3600;
-
-  await strapi.documents(`${PLUGIN_UID}.mcp-oauth-token`).create({
-    data: {
-      accessToken: newAccessToken,
-      refreshToken: newRefreshToken,
-      clientId: client.clientId,
-      expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
-      refreshExpiresAt: new Date(Date.now() + refreshExpiresIn * 1000).toISOString(),
-      revoked: false,
+  return {
+    /** RFC 9728 Protected Resource Metadata for /mcp. */
+    async protectedResource(ctx: any) {
+      const endpoints = getEndpoints(ctx, strapi);
+      ctx.set('Cache-Control', 'public, max-age=300');
+      ctx.body = {
+        resource: endpoints.resource,
+        authorization_servers: [endpoints.issuer],
+        bearer_methods_supported: ['header'],
+        resource_name: 'Strapi MCP server',
+      };
     },
-  });
 
-  ctx.body = {
-    access_token: newAccessToken,
-    token_type: 'Bearer',
-    expires_in: expiresIn,
-    refresh_token: newRefreshToken,
+    /** RFC 8414 Authorization Server Metadata. */
+    async authorizationServer(ctx: any) {
+      const endpoints = getEndpoints(ctx, strapi);
+      ctx.set('Cache-Control', 'public, max-age=300');
+      ctx.body = {
+        issuer: endpoints.issuer,
+        authorization_endpoint: endpoints.authorization,
+        token_endpoint: endpoints.token,
+        ...(config().dynamicClientRegistration ? { registration_endpoint: endpoints.registration } : {}),
+        revocation_endpoint: endpoints.revocation,
+        response_types_supported: ['code'],
+        response_modes_supported: ['query'],
+        grant_types_supported: ['authorization_code', 'refresh_token'],
+        token_endpoint_auth_methods_supported: AUTH_METHODS,
+        revocation_endpoint_auth_methods_supported: AUTH_METHODS,
+        code_challenge_methods_supported: ['S256'],
+      };
+    },
+
+    /** GET: show the sign-in and consent page. */
+    async authorize(ctx: any) {
+      const request = await validateAuthorizationRequest(ctx, ctx.query);
+      if (!request) {
+        return;
+      }
+      sendHtml(
+        ctx,
+        200,
+        renderAuthorizePage(authorizePageProps(ctx, request.client, ctx.query)),
+        redirectOriginForCsp(request.redirectUri)
+      );
+    },
+
+    /** POST: check the admin credentials, then redirect back with a code. */
+    async authorizeSubmit(ctx: any) {
+      const body = ctx.request.body ?? {};
+      const request = await validateAuthorizationRequest(ctx, body);
+      if (!request) {
+        return;
+      }
+      const { client, redirectUri, state } = request;
+
+      if (body.decision !== 'approve') {
+        return redirectWith(ctx, redirectUri, {
+          error: 'access_denied',
+          error_description: 'The user denied the request',
+          state,
+        });
+      }
+
+      const email = str(body.email)?.trim().toLowerCase() ?? '';
+      const password = str(body.password) ?? '';
+      const lockKey = `${ctx.request.ip}|${email}`;
+      const rerender = (status: number, error: string) =>
+        sendHtml(
+          ctx,
+          status,
+          renderAuthorizePage({ ...authorizePageProps(ctx, client, body), email, error }),
+          redirectOriginForCsp(redirectUri)
+        );
+
+      if (isLoginLocked(lockKey)) {
+        return rerender(429, 'Too many failed attempts. Wait 15 minutes and try again.');
+      }
+
+      const [, user, info] = await (strapi.service('admin::auth') as any).checkCredentials({ email, password });
+      if (!user) {
+        recordLoginFailure(lockKey);
+        return rerender(401, info?.message === 'User not active' ? 'This admin account is not active.' : 'Invalid email or password.');
+      }
+      loginFailures.delete(lockKey);
+
+      try {
+        const code = await service().createAuthorizationCode({
+          client,
+          adminUserId: user.id,
+          redirectUri,
+          codeChallenge: request.codeChallenge,
+          codeChallengeMethod: request.codeChallengeMethod,
+          scope: str(body.scope),
+          resource: str(body.resource),
+        });
+        strapi.log.info(`[${PLUGIN_ID}] ${user.email} authorized client "${client.name}"`);
+        redirectWith(ctx, redirectUri, { code, state, iss: getEndpoints(ctx, strapi).issuer });
+      } catch (error) {
+        strapi.log.error(`[${PLUGIN_ID}] Failed to create authorization code: ${(error as Error).stack}`);
+        redirectWith(ctx, redirectUri, { error: 'server_error', state });
+      }
+    },
+
+    async token(ctx: any) {
+      ctx.set('Cache-Control', 'no-store');
+      ctx.set('Pragma', 'no-cache');
+      const body = ctx.request.body ?? {};
+      try {
+        const { clientId, clientSecret } = readClientCredentials(ctx);
+        const client = await service().authenticateClient(clientId, clientSecret);
+
+        if (body.grant_type === 'authorization_code') {
+          ctx.body = await service().exchangeAuthorizationCode(client, {
+            code: str(body.code),
+            redirectUri: str(body.redirect_uri),
+            codeVerifier: str(body.code_verifier),
+          });
+        } else if (body.grant_type === 'refresh_token') {
+          ctx.body = await service().refreshGrant(client, str(body.refresh_token));
+        } else {
+          throw new OAuthError('unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
+        }
+      } catch (error) {
+        sendOAuthError(ctx, error, strapi);
+      }
+    },
+
+    /** RFC 7591 dynamic client registration. */
+    async register(ctx: any) {
+      ctx.set('Cache-Control', 'no-store');
+      try {
+        if (!config().dynamicClientRegistration) {
+          throw new OAuthError('access_denied', 'Dynamic client registration is disabled', 403);
+        }
+        const body = ctx.request.body ?? {};
+        const redirectUris = body.redirect_uris;
+        if (!Array.isArray(redirectUris) || redirectUris.length === 0 || redirectUris.length > 10) {
+          throw new OAuthError('invalid_redirect_uri', 'redirect_uris must be a non-empty array');
+        }
+        const invalid = redirectUris.find((uri: unknown) => !isAllowedRegisteredRedirectUri(uri));
+        if (invalid !== undefined) {
+          throw new OAuthError(
+            'invalid_redirect_uri',
+            `Redirect URI not allowed: ${String(invalid)}. Use https, http on localhost, or a native app scheme.`
+          );
+        }
+
+        const method = (body.token_endpoint_auth_method ?? 'client_secret_basic') as TokenEndpointAuthMethod;
+        if (!AUTH_METHODS.includes(method)) {
+          throw new OAuthError('invalid_client_metadata', `Unsupported token_endpoint_auth_method: ${method}`);
+        }
+        const grantTypes: string[] = body.grant_types ?? ['authorization_code', 'refresh_token'];
+        if (!Array.isArray(grantTypes) || grantTypes.some((g) => !['authorization_code', 'refresh_token'].includes(g))) {
+          throw new OAuthError('invalid_client_metadata', 'Only authorization_code and refresh_token grants are supported');
+        }
+
+        const clientName = str(body.client_name);
+        const { clientId, clientSecret } = await service().registerClient({
+          clientName,
+          redirectUris,
+          tokenEndpointAuthMethod: method,
+        });
+        strapi.log.info(`[${PLUGIN_ID}] Registered dynamic client "${clientName ?? clientId}"`);
+
+        ctx.status = 201;
+        ctx.body = {
+          client_id: clientId,
+          ...(clientSecret ? { client_secret: clientSecret, client_secret_expires_at: 0 } : {}),
+          client_id_issued_at: Math.floor(Date.now() / 1000),
+          client_name: clientName,
+          redirect_uris: redirectUris,
+          grant_types: grantTypes,
+          response_types: ['code'],
+          token_endpoint_auth_method: method,
+        };
+      } catch (error) {
+        sendOAuthError(ctx, error, strapi);
+      }
+    },
+
+    /** RFC 7009 token revocation. Always 200 for unknown tokens. */
+    async revoke(ctx: any) {
+      ctx.set('Cache-Control', 'no-store');
+      try {
+        const { clientId, clientSecret } = readClientCredentials(ctx);
+        const client = await service().authenticateClient(clientId, clientSecret);
+        const token = str(ctx.request.body?.token);
+        if (!token) {
+          throw new OAuthError('invalid_request', 'token is required');
+        }
+        await service().revokeByToken(client, token);
+        ctx.status = 200;
+        ctx.body = {};
+      } catch (error) {
+        sendOAuthError(ctx, error, strapi);
+      }
+    },
   };
-}
+};
 
 export default oauthController;

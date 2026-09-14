@@ -1,7 +1,7 @@
 {
   "name": "strapi-oauth-mcp-manager",
-  "version": "0.1.5",
-  "description": "Centralized OAuth 2.0 authentication manager for Strapi MCP plugins. Supports ChatGPT, Claude, and custom OAuth clients.",
+  "version": "1.0.0",
+  "description": "OAuth 2.1 authorization server for Strapi's official MCP server (/mcp). Lets Claude, ChatGPT, and other MCP clients connect with a Strapi admin login instead of a pasted token.",
   "keywords": [
     "strapi",
     "plugin",
@@ -51,7 +51,8 @@
     "watch:link": "strapi-plugin watch:link",
     "verify": "strapi-plugin verify",
     "test:ts:front": "run -T tsc -p admin/tsconfig.json",
-    "test:ts:back": "run -T tsc -p server/tsconfig.json"
+    "test:ts:back": "run -T tsc -p server/tsconfig.json",
+    "test:e2e": "node test/e2e/oauth-flow.mjs && node test/e2e/admin-clients.mjs"
   },
   "dependencies": {
     "@strapi/design-system": "^2.0.0-rc.30",
@@ -59,7 +60,7 @@
     "react-intl": "^8.0.10"
   },
   "devDependencies": {
-    "@strapi/strapi": "^5.33.1",
+    "@strapi/strapi": "^5.53.0",
     "@strapi/sdk-plugin": "^5.4.0",
     "prettier": "^3.7.4",
     "react": "^18.3.1",
@@ -68,11 +69,12 @@
     "styled-components": "^6.1.19",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
-    "@strapi/typescript-utils": "^5.33.1",
-    "typescript": "^5.9.3"
+    "@strapi/typescript-utils": "^5.53.0",
+    "typescript": "^5.9.3",
+    "@strapi/utils": "^5.53.0"
   },
   "peerDependencies": {
-    "@strapi/strapi": "^5.33.1",
+    "@strapi/strapi": "^5.47.0",
     "@strapi/sdk-plugin": "^5.4.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
