@@ -3,7 +3,7 @@ import mcpOauthMiddleware from './middlewares/mcp-oauth';
 import { PLUGIN_ID } from './pluginId';
 import type { PluginConfig } from './config';
 import type { OAuthService } from './services/oauth';
-import { MCP_PATH } from './utils/url';
+import { MCP_PATH, isInsecureOrigin } from './utils/url';
 
 let cleanupTimer: NodeJS.Timeout | undefined;
 
@@ -16,6 +16,13 @@ const bootstrap = async ({ strapi }: { strapi: Core.Strapi }) => {
   if (!strapi.config.get('admin.secrets.encryptionKey')) {
     strapi.log.warn(
       `[${PLUGIN_ID}] admin.secrets.encryptionKey is not set. OAuth grants can't be issued until it is (ENCRYPTION_KEY).`
+    );
+  }
+
+  const serverUrl = strapi.config.get('server.url') as string | undefined;
+  if (serverUrl && isInsecureOrigin(serverUrl)) {
+    strapi.log.warn(
+      `[${PLUGIN_ID}] server.url is ${serverUrl}. MCP OAuth over plain http outside localhost exposes codes and tokens; use https.`
     );
   }
 

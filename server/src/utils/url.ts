@@ -10,10 +10,38 @@ export const MCP_PATH = '/mcp';
  */
 export const getBaseUrl = (ctx: any, strapi: Core.Strapi): string => {
   const serverUrl = strapi.config.get('server.url') as string | undefined;
-  if (serverUrl && /^https?:\/\//.test(serverUrl)) {
-    return serverUrl.replace(/\/+$/, '');
+  const baseUrl = serverUrl && /^https?:\/\//.test(serverUrl) ? serverUrl.replace(/\/+$/, '') : ctx.request.origin;
+  warnIfInsecure(baseUrl, strapi);
+  return baseUrl;
+};
+
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+let insecureWarningShown = false;
+
+/** Returns true when OAuth would run over plain http on a host other than loopback. */
+export const isInsecureOrigin = (url: string) => {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' && !LOOPBACK_HOSTS.has(parsed.hostname);
+  } catch {
+    return false;
   }
-  return ctx.request.origin;
+};
+
+/**
+ * Plain http outside localhost exposes authorization codes and tokens on the network. It is
+ * still allowed, because TLS is often terminated by a proxy in front of Strapi, but it is logged
+ * once so a misconfigured public deployment is noticed.
+ */
+const warnIfInsecure = (baseUrl: string, strapi: Core.Strapi) => {
+  if (insecureWarningShown || !isInsecureOrigin(baseUrl)) {
+    return;
+  }
+  insecureWarningShown = true;
+  strapi.log.warn(
+    `[${PLUGIN_ID}] MCP OAuth is served over plain http at ${baseUrl}. Codes and tokens can be intercepted. ` +
+      'Serve Strapi over https, or set server.url to your https address and server.proxy to true behind a TLS proxy.'
+  );
 };
 
 export const getOAuthBasePath = (strapi: Core.Strapi) => {
@@ -48,8 +76,6 @@ export const matchRedirectUri = (redirectUri: string, allowedPatterns: string[])
     const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*');
     return new RegExp(`^${escaped}$`).test(redirectUri);
   });
-
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 /**
  * Redirect URIs a client may register dynamically: https, http on loopback only,

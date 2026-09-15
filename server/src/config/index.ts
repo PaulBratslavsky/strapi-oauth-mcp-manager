@@ -5,6 +5,11 @@ export interface PluginConfig {
   refreshTokenTtl: number;
   /** Lifetime of an authorization code, in seconds. */
   authorizationCodeTtl: number;
+  /**
+   * After a refresh token is rotated, how long a repeat use of the old one is treated as a
+   * harmless retry (rejected, session kept). After this window, reusing it revokes the session.
+   */
+  refreshTokenReuseWindow: number;
   /** Allow MCP clients to register themselves (RFC 7591). Claude and ChatGPT rely on this. */
   dynamicClientRegistration: boolean;
   /** How often expired codes and grants are cleaned up, in milliseconds. 0 disables it. */
@@ -22,12 +27,13 @@ export default {
     accessTokenTtl: 60 * 60,
     refreshTokenTtl: 30 * 24 * 60 * 60,
     authorizationCodeTtl: 10 * 60,
+    refreshTokenReuseWindow: 10,
     dynamicClientRegistration: true,
     cleanupIntervalMs: 60 * 60 * 1000,
     allowUserPermissions: false,
   } satisfies PluginConfig,
   validator(config: Partial<PluginConfig>) {
-    for (const key of ['accessTokenTtl', 'refreshTokenTtl', 'authorizationCodeTtl', 'cleanupIntervalMs'] as const) {
+    for (const key of ['accessTokenTtl', 'refreshTokenTtl', 'authorizationCodeTtl', 'refreshTokenReuseWindow', 'cleanupIntervalMs'] as const) {
       if (config[key] !== undefined && (typeof config[key] !== 'number' || config[key] < 0)) {
         throw new Error(`[strapi-oauth-mcp-manager] config.${key} must be a non-negative number`);
       }

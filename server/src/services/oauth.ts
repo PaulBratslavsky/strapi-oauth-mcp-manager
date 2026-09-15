@@ -350,10 +350,12 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         throw new OAuthError('invalid_request', 'refresh_token is required');
       }
 
+      const presentedHash = hashToken(refreshToken);
       const grant = await strapi.db.query(UID.grant).findOne({
-        where: { refreshTokenHash: hashToken(refreshToken), clientId: client.clientId },
+        where: { refreshTokenHash: presentedHash, clientId: client.clientId },
       });
       if (!grant) {
+        await this.handleRefreshTokenReuse(client, presentedHash);
         throw new OAuthError('invalid_grant', 'Invalid refresh token');
       }
       if (isExpired(grant.refreshExpiresAt)) {
@@ -365,9 +367,37 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         throw new OAuthError('invalid_grant', 'This authorization was revoked');
       }
 
+      // Rotate atomically: only one request can swap out a given refresh token. A concurrent
+      // request with the same token matches no row and gets invalid_grant.
       const tokens = issueTokens();
-      await strapi.db.query(UID.grant).update({ where: { id: grant.id }, data: tokens.row });
+      const { count } = await strapi.db.query(UID.grant).updateMany({
+        where: { id: grant.id, refreshTokenHash: presentedHash },
+        data: { ...tokens.row, previousRefreshTokenHash: presentedHash, rotatedAt: new Date().toISOString() },
+      });
+      if (count !== 1) {
+        throw new OAuthError('invalid_grant', 'Invalid refresh token');
+      }
       return tokens.response(grant.scope);
+    },
+
+    /**
+     * A refresh token that was already rotated is being used again. Shortly after rotation this
+     * is usually a client retrying in parallel, so only reject it. Later it suggests the token
+     * leaked, so revoke the whole session.
+     */
+    async handleRefreshTokenReuse(client: OAuthClient, presentedHash: string) {
+      const grant = await strapi.db.query(UID.grant).findOne({
+        where: { previousRefreshTokenHash: presentedHash, clientId: client.clientId },
+        select: ['id', 'rotatedAt'],
+      });
+      if (!grant) {
+        return;
+      }
+      const rotatedAt = grant.rotatedAt ? new Date(grant.rotatedAt).getTime() : 0;
+      if (Date.now() - rotatedAt > config().refreshTokenReuseWindow * 1000) {
+        strapi.log.warn(`[${PLUGIN_ID}] Rotated refresh token reused for client "${client.name}"; revoking the session`);
+        await this.revokeGrant(grant.id);
+      }
     },
 
     /**

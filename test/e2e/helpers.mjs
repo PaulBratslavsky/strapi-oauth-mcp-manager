@@ -11,8 +11,16 @@ const json = { 'Content-Type': 'application/json' };
 const form = { 'Content-Type': 'application/x-www-form-urlencoded' };
 
 let failures = 0;
+
+/** Keep codes, tokens and secrets out of test logs. */
+const redact = (text) =>
+  String(text)
+    .replace(/mcp_(at|rt|code|secret)_[A-Za-z0-9_-]+/g, 'mcp_$1_[redacted]')
+    .replace(/([?&](code|access_token|refresh_token)=)[^&\s"]+/g, '$1[redacted]')
+    .replace(/("(access_token|refresh_token|client_secret|accessKey)"\s*:\s*")[^"]+/g, '$1[redacted]');
+
 export const check = (name, condition, extra = '') => {
-  console.log(`${condition ? 'PASS' : 'FAIL'}  ${name}${extra ? `  — ${extra}` : ''}`);
+  console.log(`${condition ? 'PASS' : 'FAIL'}  ${name}${extra ? `  — ${redact(extra)}` : ''}`);
   if (!condition) failures++;
 };
 export const finish = () => {
@@ -82,6 +90,8 @@ export const exchangeCode = async (params, headers) => {
   const res = await postForm(`${OAUTH}/token`, { grant_type: 'authorization_code', ...params }, headers);
   return { status: res.status, body: await res.json() };
 };
+
+export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const refresh = async (params) => {
   const res = await postForm(`${OAUTH}/token`, { grant_type: 'refresh_token', ...params });

@@ -30,6 +30,10 @@ const flow = await authorize({ authParams: { response_type: 'code', client_id: c
 check('confidential client may skip PKCE', !!flow.code);
 const basic = 'Basic ' + Buffer.from(`${client.clientId}:wrong`).toString('base64');
 check('wrong client secret → 401', (await exchangeCode({ code: flow.code, redirect_uri: REDIRECT }, { Authorization: basic })).status === 401);
+const malformed = 'Basic ' + Buffer.from(`%zz:${client.clientSecret}`).toString('base64');
+check('malformed Basic credentials → 401 invalid_client', await exchangeCode({ code: 'x', redirect_uri: REDIRECT }, { Authorization: malformed }).then((r) => r.status === 401 && r.body.error === 'invalid_client'));
+const noColon = 'Basic ' + Buffer.from('no-separator').toString('base64');
+check('Basic credentials without a colon → 401', (await exchangeCode({ code: 'x', redirect_uri: REDIRECT }, { Authorization: noColon })).status === 401);
 
 // Two sessions, two tokens, two permission sets
 const editorSession = (await connect(editorToken.id)).body;

@@ -4,6 +4,7 @@ import {
   Badge,
   Box,
   Button,
+  Dialog,
   EmptyStateLayout,
   Field,
   Flex,
@@ -23,8 +24,8 @@ import {
   Tr,
   Typography,
 } from '@strapi/design-system';
-import { Duplicate, Plus, Trash, User } from '@strapi/icons';
-import { Layouts, Page, useFetchClient, useNotification } from '@strapi/strapi/admin';
+import { Duplicate, Plus, Trash, User, WarningCircle } from '@strapi/icons';
+import { ConfirmDialog, Layouts, Page, useFetchClient, useNotification } from '@strapi/strapi/admin';
 
 import { PLUGIN_ID } from '../pluginId';
 
@@ -66,6 +67,13 @@ interface MappedToken {
 }
 
 const PICK_ON_CONNECT = 'pick';
+
+interface PendingConfirmation {
+  title: string;
+  body: string;
+  action: () => Promise<unknown>;
+  successMessage: string;
+}
 
 interface Client {
   id: number;
@@ -288,6 +296,8 @@ const HomePage = () => {
   const [clients, setClients] = useState<Client[]>([]);
   const [tokens, setTokens] = useState<TokenOption[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [confirmation, setConfirmation] = useState<PendingConfirmation | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -301,8 +311,10 @@ const HomePage = () => {
       setOverview(o.data.data);
       setGrants(g.data.data);
       setClients(c.data.data);
+      setLoadError(false);
     } catch {
-      toggleNotification({ type: 'danger', message: 'Could not load MCP OAuth data' });
+      // Don't show empty tables for data that failed to load.
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -324,6 +336,35 @@ const HomePage = () => {
 
   if (loading) {
     return <Page.Loading />;
+  }
+
+  if (loadError) {
+    return (
+      <Page.Main>
+        <Page.Title>MCP OAuth</Page.Title>
+        <Layouts.Header title="MCP OAuth" />
+        <Layouts.Content>
+          <Alert
+            variant="danger"
+            title="Could not load MCP OAuth data"
+            closeLabel="Close"
+            action={
+              <Button
+                variant="tertiary"
+                onClick={() => {
+                  setLoading(true);
+                  load();
+                }}
+              >
+                Retry
+              </Button>
+            }
+          >
+            Check that you have the Manage MCP OAuth clients and grants permission and that Strapi is running.
+          </Alert>
+        </Layouts.Content>
+      </Page.Main>
+    );
   }
 
   return (
@@ -408,10 +449,12 @@ const HomePage = () => {
                             label={`Revoke every session approved by ${grant.userEmail ?? 'this user'}`}
                             variant="ghost"
                             onClick={() =>
-                              run(
-                                () => del(`/${PLUGIN_ID}/users/${grant.adminUserId}/grants`),
-                                `All sessions for ${grant.userEmail ?? 'this user'} revoked`
-                              )
+                              setConfirmation({
+                                title: 'Revoke all sessions for this user?',
+                                body: `Every MCP session approved by ${grant.userEmail ?? 'this user'} ends now, across all clients. Their admin tokens are kept.`,
+                                action: () => del(`/${PLUGIN_ID}/users/${grant.adminUserId}/grants`),
+                                successMessage: `All sessions for ${grant.userEmail ?? 'this user'} revoked`,
+                              })
                             }
                           >
                             <User />
@@ -504,7 +547,18 @@ const HomePage = () => {
                         <IconButton
                           label={`Delete ${client.name}`}
                           variant="ghost"
-                          onClick={() => run(() => del(`/${PLUGIN_ID}/clients/${client.id}`), 'Client deleted')}
+                          onClick={() =>
+                            setConfirmation({
+                              title: `Delete ${client.name}?`,
+                              body: `${client.name} is disconnected and all of its sessions end. ${
+                                client.registrationType === 'manual'
+                                  ? 'Its client ID and secret stop working and cannot be recovered.'
+                                  : 'The client will need to register again to reconnect.'
+                              }`,
+                              action: () => del(`/${PLUGIN_ID}/clients/${client.id}`),
+                              successMessage: 'Client deleted',
+                            })
+                          }
                         >
                           <Trash />
                         </IconButton>
@@ -517,6 +571,22 @@ const HomePage = () => {
           </Section>
         </Flex>
       </Layouts.Content>
+      <Dialog.Root open={confirmation !== null} onOpenChange={(open: boolean) => !open && setConfirmation(null)}>
+        {confirmation && (
+          <ConfirmDialog
+            title={confirmation.title}
+            variant="danger-light"
+            icon={<WarningCircle />}
+            onConfirm={async () => {
+              const pending = confirmation;
+              setConfirmation(null);
+              await run(pending.action, pending.successMessage);
+            }}
+          >
+            {confirmation.body}
+          </ConfirmDialog>
+        )}
+      </Dialog.Root>
     </Page.Main>
   );
 };

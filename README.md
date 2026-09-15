@@ -195,7 +195,7 @@ sequenceDiagram
     S-->>C: MCP response
 ```
 
-- Access tokens last 1 hour. Refresh tokens last 30 days and are replaced every time they're used.
+- Access tokens last 1 hour. Refresh tokens last 30 days and are replaced every time they're used. If two requests use the same refresh token at once, only one succeeds.
 - On every request the plugin checks that the session exists, the admin token still exists and hasn't been regenerated, and the approving user is still active.
 - OAuth tokens and authorization codes are stored only as SHA-256 hashes. Admin token keys stay in Strapi, encrypted with `admin.secrets.encryptionKey`.
 
@@ -224,6 +224,7 @@ export default () => ({
       accessTokenTtl: 3600, // seconds
       refreshTokenTtl: 2592000, // seconds (30 days)
       authorizationCodeTtl: 600, // seconds
+      refreshTokenReuseWindow: 10, // seconds a reused refresh token counts as a retry before the session is revoked
       dynamicClientRegistration: true, // false = only clients added in the admin panel
       allowUserPermissions: false, // true = also offer "All of my permissions" on the consent page
       cleanupIntervalMs: 3600000, // how often expired data is removed; 0 turns it off
@@ -241,7 +242,9 @@ The **MCP OAuth** admin page requires the **Manage MCP OAuth clients and grants*
 - Users can connect only with admin tokens they own, whether they pick one or a client is mapped to one. This is checked again when the code is exchanged.
 - Clients without a secret must use PKCE (S256). Clients with a secret must send it.
 - Self-registered clients may use only `https` redirect URIs, `http` on `localhost`, or native app schemes. Unused self-registered clients are removed after 30 days.
-- After 5 failed sign-in attempts, an IP address and email pair is locked for 15 minutes. The count is kept in memory on each server.
+- Reusing a refresh token that was already replaced is rejected. If it happens more than 10 seconds after it was replaced, the plugin treats the token as leaked and ends the session.
+- After 5 failed sign-in attempts, an IP address and email pair is locked for 15 minutes. The count is kept in memory on each server, capped at 10,000 entries.
+- Strapi logs a warning if MCP OAuth is served over plain `http` on a host other than `localhost`. Use `https` in production.
 - The consent page can't be framed and sends a strict Content Security Policy. The step between sign-in and approval uses a signed ticket that expires after 10 minutes and works only for that request.
 
 ---

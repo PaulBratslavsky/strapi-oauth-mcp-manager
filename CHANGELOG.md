@@ -12,7 +12,10 @@ A rewrite that adds OAuth sign-in to the MCP server built into Strapi 5.47+ (`/m
 - Optional "All of my permissions" access, behind `allowUserPermissions` (off by default).
 - Revocation at every level: deactivating a user, deleting or regenerating a token, revoking a session, revoking all sessions for a user, turning off a client, or changing a client's mapped token.
 - **MCP OAuth** admin page with connection details, connected sessions and client management, gated by the new **Manage MCP OAuth clients and grants** permission.
-- Plugin configuration: `accessTokenTtl`, `refreshTokenTtl`, `authorizationCodeTtl`, `dynamicClientRegistration`, `allowUserPermissions` and `cleanupIntervalMs`.
+- Plugin configuration: `accessTokenTtl`, `refreshTokenTtl`, `authorizationCodeTtl`, `refreshTokenReuseWindow`, `dynamicClientRegistration`, `allowUserPermissions` and `cleanupIntervalMs`.
+- Refresh token reuse detection: a rotated refresh token used again after `refreshTokenReuseWindow` (10 seconds) revokes the session. Rotation is atomic, so concurrent refreshes with one token can't both succeed.
+- Warning when OAuth is served over plain `http` on a host other than `localhost`.
+- Confirmation before deleting a client or revoking all of a user's sessions, and an error state with retry when the admin page can't load.
 - End-to-end test suites (`npm run test:e2e`).
 
 ### Changed
