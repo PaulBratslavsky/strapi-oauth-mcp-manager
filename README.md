@@ -279,6 +279,7 @@ Issues and pull requests are welcome.
 
 ```bash
 npm install
+npm test        # unit tests for PKCE, consent tickets, redirect URI rules and client credentials
 npm run build   # Strapi loads the plugin from dist/, so rebuild after each change
 ```
 

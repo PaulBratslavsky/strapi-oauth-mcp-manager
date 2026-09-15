@@ -86,7 +86,7 @@ const decodeBasicPart = (value: string) => {
 };
 
 /** Client credentials from HTTP Basic (RFC 6749 §2.3.1) or the form body. */
-const readClientCredentials = (ctx: any) => {
+export const readClientCredentials = (ctx: any) => {
   const body = ctx.request.body ?? {};
   const header: string | undefined = ctx.request.headers.authorization;
   if (header?.startsWith('Basic ')) {
