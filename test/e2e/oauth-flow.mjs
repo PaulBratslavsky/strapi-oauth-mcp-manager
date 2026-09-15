@@ -2,7 +2,7 @@
 // code exchange with PKCE, MCP calls, refresh rotation and revocation.
 import {
   BASE, OAUTH, adminSession, deleteClient, authorize, callTool, check, contentPermission, exchangeCode, finish,
-  initializeParams, mcp, pkce, refresh, registerClient, revoke, toolNames,
+  initializeParams, mcp, pkce, refresh, registerClient, revoke, sleep, toolNames,
 } from './helpers.mjs';
 
 const REDIRECT = 'http://localhost:33418/callback';
@@ -98,10 +98,28 @@ check('old access token stops working', (await mcp(tokens.access_token, 'tools/l
 check('old refresh token stops working', (await refresh({ refresh_token: tokens.refresh_token, client_id: reg.body.client_id })).status === 400);
 check('new access token works', (await mcp(refreshed.body.access_token, 'tools/list')).status === 200);
 
-// 9. Revocation keeps the user's own token
-res = await revoke({ token: refreshed.body.refresh_token, client_id: reg.body.client_id });
+// 9. Concurrent refresh: exactly one request may rotate a refresh token
+const racers = await Promise.all([1, 2, 3].map(() => refresh({ refresh_token: refreshed.body.refresh_token, client_id: reg.body.client_id })));
+const winners = racers.filter((r) => r.status === 200);
+check('concurrent refreshes with one token: exactly one succeeds', winners.length === 1, racers.map((r) => r.status).join(', '));
+const current = winners[0].body;
+check('the winning tokens work', (await mcp(current.access_token, 'tools/list')).status === 200);
+
+// 10. Reusing a rotated refresh token: harmless right away, revokes the session later
+check('reuse right after rotation is rejected', (await refresh({ refresh_token: refreshed.body.refresh_token, client_id: reg.body.client_id })).status === 400);
+check('reuse right after rotation keeps the session', (await mcp(current.access_token, 'tools/list')).status === 200);
+await sleep((Number(process.env.REUSE_WINDOW_SECONDS ?? 10) + 1) * 1000);
+check('reuse after the retry window is rejected', (await refresh({ refresh_token: refreshed.body.refresh_token, client_id: reg.body.client_id })).status === 400);
+check('reuse after the retry window revokes the session', (await mcp(current.access_token, 'tools/list')).status === 401);
+check('the session\'s latest refresh token stops working too', (await refresh({ refresh_token: current.refresh_token, client_id: reg.body.client_id })).status === 400);
+
+// 11. Revocation keeps the user's own token
+const { verifier: verifier2, challenge: challenge2 } = pkce();
+flow = await authorize({ authParams: { ...authParams, code_challenge: challenge2 }, access: `token:${readOnly.id}` });
+const fresh = (await exchangeCode({ code: flow.code, redirect_uri: REDIRECT, client_id: reg.body.client_id, code_verifier: verifier2 })).body;
+res = await revoke({ token: fresh.refresh_token, client_id: reg.body.client_id });
 check('revocation returns 200', res.status === 200);
-check('revoked session → 401', (await mcp(refreshed.body.access_token, 'tools/list')).status === 401);
+check('revoked session → 401', (await mcp(fresh.access_token, 'tools/list')).status === 401);
 const stillThere = await admin.call('GET', `/admin/admin-tokens/${readOnly.id}`);
 check('revoking a session does not delete the chosen admin token', stillThere.status === 200);
 

@@ -17,9 +17,26 @@ import { renderAuthorizePage, renderChooseAccessPage, renderErrorPage } from '..
 const AUTH_METHODS: TokenEndpointAuthMethod[] = ['client_secret_basic', 'client_secret_post', 'none'];
 
 // Simple in-memory brute-force guard for the login form: 5 failures per IP+email per 15 minutes.
+// The map is bounded so a flood of distinct emails can't grow memory without limit.
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 5;
+const LOGIN_MAX_TRACKED = 10_000;
 const loginFailures = new Map<string, { count: number; resetAt: number }>();
+
+const pruneLoginFailures = () => {
+  const now = Date.now();
+  for (const [key, entry] of loginFailures) {
+    if (entry.resetAt < now) {
+      loginFailures.delete(key);
+    }
+  }
+  // Still full of active entries: evict the oldest (Maps iterate in insertion order).
+  while (loginFailures.size >= LOGIN_MAX_TRACKED) {
+    const oldest = loginFailures.keys().next().value;
+    if (oldest === undefined) break;
+    loginFailures.delete(oldest);
+  }
+};
 
 const isLoginLocked = (key: string) => {
   const entry = loginFailures.get(key);
@@ -33,6 +50,10 @@ const isLoginLocked = (key: string) => {
 const recordLoginFailure = (key: string) => {
   const entry = loginFailures.get(key);
   if (!entry || entry.resetAt < Date.now()) {
+    loginFailures.delete(key);
+    if (loginFailures.size >= LOGIN_MAX_TRACKED) {
+      pruneLoginFailures();
+    }
     loginFailures.set(key, { count: 1, resetAt: Date.now() + LOGIN_WINDOW_MS });
   } else {
     entry.count += 1;
@@ -55,6 +76,15 @@ const sendOAuthError = (ctx: any, error: unknown, strapi: Core.Strapi) => {
   ctx.body = { error: 'server_error', error_description: 'Unexpected server error' };
 };
 
+/** RFC 6749 §2.3.1: Basic credentials are form-urlencoded before base64. */
+const decodeBasicPart = (value: string) => {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, ' '));
+  } catch {
+    throw new OAuthError('invalid_client', 'Invalid client credentials', 401);
+  }
+};
+
 /** Client credentials from HTTP Basic (RFC 6749 §2.3.1) or the form body. */
 const readClientCredentials = (ctx: any) => {
   const body = ctx.request.body ?? {};
@@ -62,12 +92,13 @@ const readClientCredentials = (ctx: any) => {
   if (header?.startsWith('Basic ')) {
     const decoded = Buffer.from(header.slice(6), 'base64').toString();
     const separator = decoded.indexOf(':');
-    if (separator > -1) {
-      return {
-        clientId: decodeURIComponent(decoded.slice(0, separator)),
-        clientSecret: decodeURIComponent(decoded.slice(separator + 1)),
-      };
+    if (separator < 0) {
+      throw new OAuthError('invalid_client', 'Invalid client credentials', 401);
     }
+    return {
+      clientId: decodeBasicPart(decoded.slice(0, separator)),
+      clientSecret: decodeBasicPart(decoded.slice(separator + 1)),
+    };
   }
   return { clientId: str(body.client_id), clientSecret: str(body.client_secret) };
 };

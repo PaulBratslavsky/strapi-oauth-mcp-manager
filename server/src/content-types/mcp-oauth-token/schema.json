@@ -31,6 +31,13 @@
       "unique": true,
       "private": true
     },
+    "previousRefreshTokenHash": {
+      "type": "string",
+      "private": true
+    },
+    "rotatedAt": {
+      "type": "datetime"
+    },
     "clientId": {
       "type": "string",
       "required": true
