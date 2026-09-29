@@ -176,3 +176,59 @@ test('listGrants shows a customer grant with a masked subject and a staff grant 
   assert.equal(staff.subject, null);
   assert.ok(!JSON.stringify(listed).includes(LINE_SUB), 'the full subject never reaches the admin page');
 });
+
+// Kill switches while LINE is checking the ID token (up to 5 seconds). The controller authenticated
+// the client before that call, so the exchange must look at the client again after creating the grant.
+
+type Service = ReturnType<typeof oauthService>;
+const unknownOrInactiveClient = (error: any) => error.error === 'invalid_client' && error.status === 401 && error.description === 'Unknown or inactive client';
+const signInUnavailable = (error: any) =>
+  error.error === 'temporarily_unavailable' && error.status === 503 && error.description === "LINE sign-in isn't available right now. Try again later.";
+
+const killSwitches: Array<{ name: string; pull: (service: Service) => Promise<unknown>; refusal: (error: any) => boolean }> = [
+  { name: 'deactivated', pull: (service) => service.setClientActive(1, false), refusal: unknownOrInactiveClient },
+  { name: 'deleted', pull: (service) => service.deleteClient(1), refusal: unknownOrInactiveClient },
+  { name: 're-mapped to another admin token', pull: (service) => service.setClientToken(1, 8, 1), refusal: signInUnavailable },
+];
+
+for (const killSwitch of killSwitches) {
+  test(`a client ${killSwitch.name} while LINE checks the ID token issues no session`, async () => {
+    const world = lineWorld();
+    const service = oauthService({ strapi: world.strapi });
+    const client = await service.authenticateClient('mcp_client_line', undefined);
+    globalThis.fetch = lineVerifies(LINE_SUB, () => killSwitch.pull(service).then(() => {}));
+
+    await assert.rejects(
+      service.exchangeIdToken(client, { subjectToken: ID_TOKEN, subjectTokenType: TOKEN_TYPE_ID_TOKEN }),
+      killSwitch.refusal
+    );
+    assert.deepEqual(world.grants, [], 'no grant survives');
+  });
+
+  test(`a client ${killSwitch.name} after its sessions were swept but before the new grant is stored issues no session`, async () => {
+    // The kill switch reads the client's grants, then LINE answers and the exchange runs to the end
+    // before the kill switch deletes what it read: the new grant is not in its list.
+    let exchange: Promise<unknown> = Promise.resolve();
+    let lineAnswers!: () => void;
+    const lineAnswered = new Promise<void>((resolve) => (lineAnswers = resolve));
+    const world = lineWorld({
+      hooks: {
+        grants: {
+          afterFindMany: async (where) => {
+            if (where?.clientId !== 'mcp_client_line') return;
+            lineAnswers();
+            await exchange.catch(() => {});
+          },
+        },
+      },
+    });
+    const service = oauthService({ strapi: world.strapi });
+    const client = await service.authenticateClient('mcp_client_line', undefined);
+    globalThis.fetch = lineVerifies(LINE_SUB, () => lineAnswered);
+
+    exchange = service.exchangeIdToken(client, { subjectToken: ID_TOKEN, subjectTokenType: TOKEN_TYPE_ID_TOKEN });
+    await killSwitch.pull(service);
+    await assert.rejects(exchange, killSwitch.refusal);
+    assert.deepEqual(world.grants, [], 'no grant survives');
+  });
+}

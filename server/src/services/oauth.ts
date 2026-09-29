@@ -69,8 +69,12 @@ export type AccessTokenResult =
 
 const MINTED_TOKEN_PREFIX = 'MCP OAuth · ';
 
+/** What a customer's app is told when LINE sign-in fails for a reason only an admin can fix. */
+const LINE_SIGN_IN_UNAVAILABLE = "LINE sign-in isn't available right now. Try again later.";
+
 const toIso = (secondsFromNow: number) => new Date(Date.now() + secondsFromNow * 1000).toISOString();
 const isExpired = (date: string | Date | null | undefined) => !date || new Date(date).getTime() <= Date.now();
+const unknownOrInactiveClient = () => new OAuthError('invalid_client', 'Unknown or inactive client', 401);
 
 const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
   const config = (): PluginConfig => strapi.config.get(`plugin::${PLUGIN_ID}`) as PluginConfig;
@@ -212,7 +216,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     async authenticateClient(clientId: string | undefined, clientSecret: string | undefined) {
       const client = await this.findClient(clientId ?? '');
       if (!client) {
-        throw new OAuthError('invalid_client', 'Unknown or inactive client', 401);
+        throw unknownOrInactiveClient();
       }
       if (client.tokenEndpointAuthMethod !== 'none') {
         if (!clientSecret || !client.clientSecret || !safeEqual(clientSecret, client.clientSecret)) {
@@ -420,7 +424,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       const adminToken = await loadOwnedToken(mapped.id, mapped.ownerId);
       const tokens = issueTokens({ refresh: false, ttl: config().endUserAccessTokenTtl });
 
-      await strapi.db.query(UID.grant).create({
+      const grant = await strapi.db.query(UID.grant).create({
         data: {
           ...tokens.row,
           clientId: client.clientId,
@@ -433,6 +437,20 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
           subject,
         },
       });
+
+      // The client was checked before LINE answered, which can take seconds. Deactivating, deleting
+      // or re-mapping a client changes the client row before sweeping its grants, so reading it again
+      // now either sees that change or leaves this grant for the sweep to find.
+      const current = await strapi.db.query(UID.client).findOne({
+        where: { id: client.id },
+        select: ['id', 'active', 'adminTokenId'],
+      });
+      if (!current || !current.active || Number(current.adminTokenId) !== Number(adminToken.id)) {
+        await strapi.db.query(UID.grant).delete({ where: { id: grant.id } });
+        throw !current || !current.active
+          ? unknownOrInactiveClient()
+          : new OAuthError('temporarily_unavailable', LINE_SIGN_IN_UNAVAILABLE, 503);
+      }
 
       strapi.log.info(`[${PLUGIN_ID}] Issued a customer session for client "${client.name}" (${maskSubject(subject)})`);
       return { ...tokens.response('mcp'), issued_token_type: TOKEN_TYPE_ACCESS_TOKEN };
@@ -587,6 +605,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         }
       }
       if ((client.adminTokenId ?? null) !== adminTokenId) {
+        // Update before sweeping: a token exchange in flight re-reads the client (see exchangeIdToken).
         await strapi.db.query(UID.client).update({ where: { id }, data: { adminTokenId } });
         await this.revokeClientGrants(client.clientId);
       }
@@ -727,6 +746,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     },
 
     async setClientActive(id: number, active: boolean) {
+      // Update before sweeping: a token exchange in flight re-reads the client (see exchangeIdToken).
       const client = await strapi.db.query(UID.client).update({ where: { id }, data: { active } });
       if (client && !active) {
         await this.revokeClientGrants(client.clientId);
@@ -739,6 +759,9 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       if (!client) {
         return false;
       }
+      // Turn the client off before sweeping, as setClientActive does: a token exchange still waiting
+      // on LINE reads the client again after storing its grant, so it sees this or the sweep finds it.
+      await strapi.db.query(UID.client).update({ where: { id }, data: { active: false } });
       await this.revokeClientGrants(client.clientId);
       await strapi.db.query(UID.code).deleteMany({ where: { clientId: client.clientId } });
       await strapi.db.query(UID.client).delete({ where: { id } });
