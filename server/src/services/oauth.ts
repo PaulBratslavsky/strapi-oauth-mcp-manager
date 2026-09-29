@@ -562,10 +562,14 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     },
 
     /**
-     * Which customer holds this MCP session: the grant's subject (e.g. "line:U…"), or null for
-     * staff sessions, plain admin tokens and anything invalid. Tool plugins pass the raw
-     * Authorization header from their handler's extra.requestInfo.headers; tools see the caller's
-     * original header. Read-only: the middleware already validated and recorded this request.
+     * Which customer holds this MCP session: the grant's subject (e.g. "line:U…"). null means there is
+     * no verified customer (a staff session, a plain admin token, or an unknown or expired token), not
+     * that the caller is staff. Tool plugins pass the raw Authorization header from their handler's
+     * extra.requestInfo.headers; tools see the caller's original header.
+     *
+     * It identifies the customer but doesn't authenticate the request, so call it only from MCP tool
+     * handlers, where the middleware has already validated the session. Read-only: the middleware
+     * already validated and recorded this request.
      */
     async resolveSubject(authorization: string | string[] | undefined): Promise<string | null> {
       if (typeof authorization !== 'string') {
