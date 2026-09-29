@@ -58,8 +58,8 @@
     "watch": "strapi-plugin watch",
     "watch:link": "strapi-plugin watch:link",
     "verify": "strapi-plugin verify",
-    "test:ts:front": "run -T tsc -p admin/tsconfig.json",
-    "test:ts:back": "run -T tsc -p server/tsconfig.json",
+    "test:ts:front": "tsc -p admin/tsconfig.json --noEmit",
+    "test:ts:back": "tsc -p server/tsconfig.json --noEmit",
     "test:e2e": "node test/e2e/oauth-flow.mjs && node test/e2e/admin-clients.mjs && node test/e2e/users.mjs && node test/e2e/client-token.mjs",
     "test": "node --import tsx --test test/unit/*.test.ts",
     "prepublishOnly": "npm test && npm run verify"

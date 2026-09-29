@@ -18,6 +18,9 @@ import { PLUGIN_ID } from '../pluginId';
 import type { PluginConfig } from '../config';
 import { TOKEN_PREFIX, generateToken, hashToken, safeEqual, verifyPkce } from '../utils/crypto';
 import { normalizeRedirectUris } from '../utils/url';
+import { OAuthError } from '../utils/oauth-error';
+
+export { OAuthError };
 
 const UID = {
   client: `plugin::${PLUGIN_ID}.mcp-oauth-client`,
@@ -38,20 +41,6 @@ export interface OAuthClient {
   /** When set, every session for this client uses this admin token, and only its owner can approve. */
   adminTokenId?: number | null;
   active: boolean;
-}
-
-export class OAuthError extends Error {
-  constructor(
-    public error: string,
-    public description: string,
-    public status = 400
-  ) {
-    super(description);
-  }
-
-  toJSON() {
-    return { error: this.error, error_description: this.description };
-  }
 }
 
 export interface SelectableToken {
