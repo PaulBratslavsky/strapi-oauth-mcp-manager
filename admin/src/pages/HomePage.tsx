@@ -494,20 +494,24 @@ const HomePage = () => {
                           >
                             <Trash />
                           </IconButton>
-                          <IconButton
-                            label={`Revoke every session approved by ${grant.userEmail ?? 'this user'}`}
-                            variant="ghost"
-                            onClick={() =>
-                              setConfirmation({
-                                title: 'Revoke all sessions for this user?',
-                                body: `Every MCP session approved by ${grant.userEmail ?? 'this user'} ends now, across all clients. Their admin tokens are kept.`,
-                                action: () => del(`/${PLUGIN_ID}/users/${grant.adminUserId}/grants`),
-                                successMessage: `All sessions for ${grant.userEmail ?? 'this user'} revoked`,
-                              })
-                            }
-                          >
-                            <User />
-                          </IconButton>
+                          {/* On a customer's row, "approved by" is the owner of the LINE client's token, so this
+                              would also end every other customer's session. Customers are revoked one by one. */}
+                          {!grant.subject && (
+                            <IconButton
+                              label={`Revoke every session approved by ${grant.userEmail ?? 'this user'}`}
+                              variant="ghost"
+                              onClick={() =>
+                                setConfirmation({
+                                  title: 'Revoke all sessions for this user?',
+                                  body: `Every MCP session approved by ${grant.userEmail ?? 'this user'} ends now, across all clients. Their admin tokens are kept.`,
+                                  action: () => del(`/${PLUGIN_ID}/users/${grant.adminUserId}/grants`),
+                                  successMessage: `All sessions for ${grant.userEmail ?? 'this user'} revoked`,
+                                })
+                              }
+                            >
+                              <User />
+                            </IconButton>
+                          )}
                         </Flex>
                       </Td>
                     </Tr>
