@@ -16,6 +16,7 @@
 import type { Core } from '@strapi/strapi';
 import { PLUGIN_ID } from '../pluginId';
 import type { PluginConfig } from '../config';
+import { extractBearerToken } from '../utils/bearer';
 import { TOKEN_PREFIX, generateToken, hashToken, safeEqual, verifyPkce } from '../utils/crypto';
 import { normalizeRedirectUris } from '../utils/url';
 import { OAuthError } from '../utils/oauth-error';
@@ -502,6 +503,30 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       return { valid: true, adminAccessKey: adminToken.accessKey, grantId: grant.id };
     },
 
+    /**
+     * Which customer holds this MCP session: the grant's subject (e.g. "line:U…"), or null for
+     * staff sessions, plain admin tokens and anything invalid. Tool plugins pass the raw
+     * Authorization header from their handler's extra.requestInfo.headers; tools see the caller's
+     * original header. Read-only: the middleware already validated and recorded this request.
+     */
+    async resolveSubject(authorization: string | string[] | undefined): Promise<string | null> {
+      if (typeof authorization !== 'string') {
+        return null;
+      }
+      const token = extractBearerToken(authorization);
+      if (!token || !token.startsWith(TOKEN_PREFIX.accessToken)) {
+        return null;
+      }
+      const grant = await strapi.db.query(UID.grant).findOne({
+        where: { accessTokenHash: hashToken(token) },
+        select: ['id', 'subject', 'expiresAt'],
+      });
+      if (!grant || !grant.subject || isExpired(grant.expiresAt)) {
+        return null;
+      }
+      return grant.subject as string;
+    },
+
     /** RFC 7009: revoke by access or refresh token. Unknown tokens are not an error. */
     async revokeByToken(client: OAuthClient, token: string) {
       const hash = hashToken(token);
@@ -602,7 +627,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
 
     async listGrants() {
       const grants = await strapi.db.query(UID.grant).findMany({
-        select: ['id', 'clientId', 'adminUserId', 'adminTokenId', 'ownsAdminToken', 'scope', 'expiresAt', 'refreshExpiresAt', 'lastUsedAt', 'createdAt'],
+        select: ['id', 'clientId', 'adminUserId', 'adminTokenId', 'ownsAdminToken', 'scope', 'subject', 'expiresAt', 'refreshExpiresAt', 'lastUsedAt', 'createdAt'],
         orderBy: { createdAt: 'desc' },
       });
       const clientIds = [...new Set(grants.map((g: any) => g.clientId))];
@@ -624,6 +649,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         const user: any = usersById.get(g.adminUserId);
         return {
           ...g,
+          subject: maskSubject(g.subject),
           clientName: clientNames.get(g.clientId) ?? g.clientId,
           userEmail: user?.email ?? null,
           userActive: Boolean(user && user.isActive === true && user.blocked !== true),
