@@ -35,6 +35,8 @@ interface Overview {
   dynamicClientRegistration: boolean;
   allowUserPermissions: boolean;
   endpoints: Record<string, string>;
+  lineSignIn: { configured: boolean; channelId: string | null };
+  tokenExchange: { grantType: string; subjectTokenType: string };
 }
 
 interface Grant {
@@ -49,6 +51,7 @@ interface Grant {
   createdAt: string;
   lastUsedAt: string | null;
   refreshExpiresAt: string;
+  subject: string | null;
 }
 
 interface TokenOption {
@@ -68,6 +71,8 @@ interface MappedToken {
 
 const PICK_ON_CONNECT = 'pick';
 
+type SignIn = 'none' | 'line';
+
 interface PendingConfirmation {
   title: string;
   body: string;
@@ -85,6 +90,7 @@ interface Client {
   adminToken: MappedToken | null;
   active: boolean;
   createdAt: string;
+  endUserProvider: 'none' | 'line';
 }
 
 interface CreatedClient {
@@ -145,22 +151,26 @@ const TokenSelect = ({
   current,
   onChange,
   disabled,
+  allowPickOnConnect = true,
 }: {
   tokens: TokenOption[];
   value: string;
   current?: MappedToken | null;
   onChange: (value: string) => void;
   disabled?: boolean;
+  /** LINE clients must always use a mapped token. */
+  allowPickOnConnect?: boolean;
 }) => {
   const ownsCurrent = current && tokens.some((t) => t.id === current.id);
   return (
     <SingleSelect
       aria-label="Admin token"
-      value={value}
+      placeholder="Choose one of your admin tokens"
+      value={!allowPickOnConnect && value === PICK_ON_CONNECT ? null : value}
       disabled={disabled}
       onChange={(next: string | number) => onChange(String(next))}
     >
-      <SingleSelectOption value={PICK_ON_CONNECT}>Picked when connecting</SingleSelectOption>
+      {allowPickOnConnect && <SingleSelectOption value={PICK_ON_CONNECT}>Picked when connecting</SingleSelectOption>}
       {current && !ownsCurrent && (
         <SingleSelectOption value={String(current.id)} disabled>
           {current.missing ? 'Deleted token' : `${current.name} (owned by ${current.ownerEmail ?? 'another admin'})`}
@@ -183,6 +193,7 @@ const CreateClientModal = ({ onCreated, tokens }: { onCreated: () => void; token
   const [redirectUris, setRedirectUris] = useState('');
   const [confidential, setConfidential] = useState('confidential');
   const [adminTokenId, setAdminTokenId] = useState(PICK_ON_CONNECT);
+  const [signIn, setSignIn] = useState<SignIn>('none');
   const [created, setCreated] = useState<CreatedClient | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -191,16 +202,19 @@ const CreateClientModal = ({ onCreated, tokens }: { onCreated: () => void; token
     setRedirectUris('');
     setConfidential('confidential');
     setAdminTokenId(PICK_ON_CONNECT);
+    setSignIn('none');
     setCreated(null);
   };
 
   const submit = async () => {
     setSubmitting(true);
     try {
+      const line = signIn === 'line';
       const { data } = await post<{ data: CreatedClient }>(`/${PLUGIN_ID}/clients`, {
         name,
-        redirectUris: redirectUris.split('\n').map((uri) => uri.trim()).filter(Boolean),
-        confidential: confidential === 'confidential',
+        endUserProvider: signIn,
+        redirectUris: line ? [] : redirectUris.split('\n').map((uri) => uri.trim()).filter(Boolean),
+        confidential: line ? false : confidential === 'confidential',
         adminTokenId: adminTokenId === PICK_ON_CONNECT ? null : Number(adminTokenId),
       });
       setCreated(data.data);
@@ -239,37 +253,54 @@ const CreateClientModal = ({ onCreated, tokens }: { onCreated: () => void; token
           ) : (
             <Flex direction="column" alignItems="stretch" gap={4}>
               <Typography textColor="neutral600">
-                Only needed for clients that ask for a client ID and secret, like ChatGPT connectors. Claude and most MCP
-                clients register themselves automatically.
+                Only needed for clients that ask for a client ID and secret, like ChatGPT connectors, or for a customer
+                app that signs people in with LINE. Claude and most MCP clients register themselves automatically.
               </Typography>
               <Field.Root name="name" required>
                 <Field.Label>Name</Field.Label>
-                <TextInput value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setName(e.target.value)} placeholder="ChatGPT" />
+                <TextInput value={name} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setName(e.target.value)} placeholder={signIn === 'line' ? 'Customer app' : 'ChatGPT'} />
               </Field.Root>
-              <Field.Root name="redirectUris" required hint="One per line. * matches any run of characters except /.">
-                <Field.Label>Redirect URIs</Field.Label>
-                <Textarea
-                  value={redirectUris}
-                  onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setRedirectUris(e.target.value)}
-                  placeholder="https://chatgpt.com/connector_platform_oauth_redirect"
-                />
+              <Field.Root name="signIn" hint="LINE: customers sign in to your LINE app, which exchanges their LINE ID token for a session. No consent page is shown.">
+                <Field.Label>Customer sign-in</Field.Label>
+                <Radio.Group value={signIn} onValueChange={(value: string) => setSignIn(value as SignIn)} aria-label="Customer sign-in">
+                  <Radio.Item value="none">None: people connect with their Strapi admin account</Radio.Item>
+                  <Radio.Item value="line">LINE: customers sign in with LINE</Radio.Item>
+                </Radio.Group>
                 <Field.Hint />
               </Field.Root>
+              {signIn === 'none' && (
+                <Field.Root name="redirectUris" required hint="One per line. * matches any run of characters except /.">
+                  <Field.Label>Redirect URIs</Field.Label>
+                  <Textarea
+                    value={redirectUris}
+                    onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setRedirectUris(e.target.value)}
+                    placeholder="https://chatgpt.com/connector_platform_oauth_redirect"
+                  />
+                  <Field.Hint />
+                </Field.Root>
+              )}
               <Field.Root
                 name="adminToken"
-                hint="Map one of your admin tokens so every connection uses it. Only you can then approve this client. Leave it to let each person pick one of their own tokens."
+                required={signIn === 'line'}
+                hint={
+                  signIn === 'line'
+                    ? "Required. Every customer session runs with this token's permissions, so grant it only what customers need."
+                    : 'Map one of your admin tokens so every connection uses it. Only you can then approve this client. Leave it to let each person pick one of their own tokens.'
+                }
               >
                 <Field.Label>Admin token</Field.Label>
-                <TokenSelect tokens={tokens} value={adminTokenId} onChange={setAdminTokenId} />
+                <TokenSelect tokens={tokens} value={adminTokenId} onChange={setAdminTokenId} allowPickOnConnect={signIn === 'none'} />
                 <Field.Hint />
               </Field.Root>
-              <Field.Root name="type">
-                <Field.Label>Client type</Field.Label>
-                <Radio.Group value={confidential} onValueChange={setConfidential} aria-label="Client type">
-                  <Radio.Item value="confidential">Confidential (client ID + secret)</Radio.Item>
-                  <Radio.Item value="public">Public (client ID only, PKCE required)</Radio.Item>
-                </Radio.Group>
-              </Field.Root>
+              {signIn === 'none' && (
+                <Field.Root name="type">
+                  <Field.Label>Client type</Field.Label>
+                  <Radio.Group value={confidential} onValueChange={setConfidential} aria-label="Client type">
+                    <Radio.Item value="confidential">Confidential (client ID + secret)</Radio.Item>
+                    <Radio.Item value="public">Public (client ID only, PKCE required)</Radio.Item>
+                  </Radio.Group>
+                </Field.Root>
+              )}
             </Flex>
           )}
         </Modal.Body>
@@ -278,7 +309,7 @@ const CreateClientModal = ({ onCreated, tokens }: { onCreated: () => void; token
             <Button variant="tertiary">{created ? 'Done' : 'Cancel'}</Button>
           </Modal.Close>
           {!created && (
-            <Button onClick={submit} loading={submitting} disabled={!name.trim() || !redirectUris.trim()}>
+            <Button onClick={submit} loading={submitting} disabled={!name.trim() || (signIn === 'line' ? adminTokenId === PICK_ON_CONNECT : !redirectUris.trim())}>
               Create
             </Button>
           )}
@@ -393,6 +424,22 @@ const HomePage = () => {
               <CopyValue label="Authorization server metadata" value={overview.endpoints.authorizationServerMetadata} />
               <CopyValue label="Authorization endpoint" value={overview.endpoints.authorization} />
               <CopyValue label="Token endpoint" value={overview.endpoints.token} />
+              {overview.lineSignIn.configured ? (
+                <>
+                  <CopyValue label="Token exchange grant type" value={overview.tokenExchange.grantType} />
+                  <CopyValue label="Subject token type (LINE ID token)" value={overview.tokenExchange.subjectTokenType} />
+                  <Typography variant="pi" textColor="neutral600">
+                    LINE sign-in is on for channel {overview.lineSignIn.channelId}. Customer apps post liff.getIDToken() to the
+                    token endpoint with a LINE client's ID.
+                  </Typography>
+                </>
+              ) : (
+                clients.some((client) => client.endUserProvider === 'line') && (
+                  <Alert variant="warning" title="LINE sign-in is off" closeLabel="Close">
+                    A LINE client exists, but identityProviders.line.channelId isn't set in this plugin's config.
+                  </Alert>
+                )
+              )}
               <Typography variant="pi" textColor="neutral600">
                 Dynamic client registration is {overview.dynamicClientRegistration ? 'on' : 'off'}.
               </Typography>
@@ -406,10 +453,11 @@ const HomePage = () => {
             {grants.length === 0 ? (
               <EmptyStateLayout content="No MCP clients are connected yet." />
             ) : (
-              <Table colCount={6} rowCount={grants.length + 1}>
+              <Table colCount={7} rowCount={grants.length + 1}>
                 <Thead>
                   <Tr>
                     <Th><Typography variant="sigma">Client</Typography></Th>
+                    <Th><Typography variant="sigma">Customer</Typography></Th>
                     <Th><Typography variant="sigma">Approved by</Typography></Th>
                     <Th><Typography variant="sigma">Access</Typography></Th>
                     <Th><Typography variant="sigma">Last used</Typography></Th>
@@ -421,6 +469,7 @@ const HomePage = () => {
                   {grants.map((grant) => (
                     <Tr key={grant.id}>
                       <Td><Typography fontWeight="semiBold">{grant.clientName}</Typography></Td>
+                      <Td><Typography>{grant.subject ?? '—'}</Typography></Td>
                       <Td>
                         <Flex gap={2}>
                           <Typography>{grant.userEmail ?? '—'}</Typography>
@@ -504,11 +553,12 @@ const HomePage = () => {
                             {client.registrationType === 'dynamic' ? 'Self-registered' : 'Manual'}
                           </Badge>
                           <Badge>{client.tokenEndpointAuthMethod === 'none' ? 'Public' : 'Confidential'}</Badge>
+                          {client.endUserProvider === 'line' && <Badge variant="success">LINE sign-in</Badge>}
                         </Flex>
                       </Td>
                       <Td>
                         <Typography variant="pi" style={{ wordBreak: 'break-all' }}>
-                          {client.redirectUris.join(', ')}
+                          {client.redirectUris.length ? client.redirectUris.join(', ') : '—'}
                         </Typography>
                       </Td>
                       <Td>
@@ -517,6 +567,7 @@ const HomePage = () => {
                             tokens={tokens}
                             current={client.adminToken}
                             value={client.adminToken ? String(client.adminToken.id) : PICK_ON_CONNECT}
+                            allowPickOnConnect={client.endUserProvider !== 'line'}
                             onChange={(next) =>
                               run(
                                 () =>

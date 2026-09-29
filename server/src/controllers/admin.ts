@@ -3,6 +3,7 @@ import { PLUGIN_ID } from '../pluginId';
 import type { PluginConfig } from '../config';
 import { OAuthError, type OAuthService } from '../services/oauth';
 import { getEndpoints, normalizeRedirectUris } from '../utils/url';
+import { GRANT_TYPE_TOKEN_EXCHANGE, TOKEN_TYPE_ID_TOKEN } from '../utils/end-user';
 
 const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
   const service = (): OAuthService => strapi.plugin(PLUGIN_ID).service('oauth');
@@ -18,6 +19,11 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
           dynamicClientRegistration: config.dynamicClientRegistration,
           allowUserPermissions: config.allowUserPermissions,
           endpoints,
+          lineSignIn: {
+            configured: Boolean(config.identityProviders?.line),
+            channelId: config.identityProviders?.line?.channelId ?? null,
+          },
+          tokenExchange: { grantType: GRANT_TYPE_TOKEN_EXCHANGE, subjectTokenType: TOKEN_TYPE_ID_TOKEN },
         },
       };
     },
