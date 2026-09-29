@@ -3,7 +3,9 @@ import { afterEach, test } from 'node:test';
 import pluginConfig from '../../server/src/config';
 import oauthController from '../../server/src/controllers/oauth';
 import oauthService from '../../server/src/services/oauth';
-import { GRANT_TYPE_TOKEN_EXCHANGE, TOKEN_TYPE_ID_TOKEN } from '../../server/src/utils/end-user';
+import { hashToken } from '../../server/src/utils/crypto';
+import { GRANT_TYPE_TOKEN_EXCHANGE, TOKEN_TYPE_ACCESS_TOKEN, TOKEN_TYPE_ID_TOKEN } from '../../server/src/utils/end-user';
+import { LINE_SUB, allLogs, lineVerifies, lineWorld } from './helpers/in-memory-strapi';
 
 const lineClient = { id: 1, name: 'Maison app', clientId: 'mcp_client_line', redirectUris: [], tokenEndpointAuthMethod: 'none', registrationType: 'manual', adminTokenId: 7, active: true, endUserProvider: 'line' };
 const staffClient = { ...lineClient, clientId: 'mcp_client_staff', adminTokenId: null, endUserProvider: 'none' };
@@ -111,4 +113,66 @@ test('discovery lists token exchange only when LINE sign-in is configured', asyn
   };
   assert.ok((await grantTypes(LINE_CONFIG)).includes(GRANT_TYPE_TOKEN_EXCHANGE));
   assert.ok(!(await grantTypes({})).includes(GRANT_TYPE_TOKEN_EXCHANGE));
+});
+
+// Service-level tests against an in-memory database (see helpers/in-memory-strapi.ts).
+
+const ID_TOKEN = 'id-token-secret';
+
+const exchangeWith = async (world: ReturnType<typeof lineWorld>) => {
+  const service = oauthService({ strapi: world.strapi });
+  const client = await service.authenticateClient('mcp_client_line', undefined);
+  return service.exchangeIdToken(client, { subjectToken: ID_TOKEN, subjectTokenType: TOKEN_TYPE_ID_TOKEN, resource: 'http://localhost:1337/mcp' });
+};
+
+test('a successful exchange creates a customer grant on the mapped token, with no refresh token', async () => {
+  const world = lineWorld({ config: { endUserAccessTokenTtl: 900 } });
+  globalThis.fetch = lineVerifies();
+  const before = Date.now();
+  const response: Record<string, unknown> = await exchangeWith(world);
+
+  assert.deepEqual(Object.keys(response).sort(), ['access_token', 'expires_in', 'issued_token_type', 'scope', 'token_type']);
+  assert.equal(response.issued_token_type, TOKEN_TYPE_ACCESS_TOKEN);
+  assert.equal(response.token_type, 'Bearer');
+  assert.equal(response.expires_in, 900);
+  assert.equal(response.scope, 'mcp');
+  assert.ok(!('refresh_token' in response), 'no refresh token');
+
+  assert.equal(world.grants.length, 1);
+  const grant = world.grants[0];
+  assert.equal(grant.clientId, 'mcp_client_line');
+  assert.equal(grant.subject, `line:${LINE_SUB}`);
+  assert.equal(grant.adminTokenId, 7, "the client's mapped token");
+  assert.equal(grant.adminUserId, 1, "the mapped token's owner");
+  assert.equal(grant.ownsAdminToken, false, 'cleanup must never delete the mapped token');
+  assert.equal(grant.scope, 'mcp');
+  assert.equal(grant.resource, 'http://localhost:1337/mcp');
+  assert.equal(grant.refreshTokenHash, null);
+  assert.equal(grant.refreshExpiresAt, grant.expiresAt, 'the grant ends with its access token');
+  assert.equal(grant.accessTokenHash, hashToken(response.access_token as string));
+  assert.equal(grant.adminKeyHash, hashToken('key-customers'));
+  const lifetime = new Date(grant.expiresAt).getTime() - before;
+  assert.ok(lifetime > 895_000 && lifetime <= 901_000, `expires after endUserAccessTokenTtl (${lifetime} ms)`);
+
+  const logs = allLogs(world.logs);
+  assert.match(logs, /line:U4af…88/, 'the success log names the customer, masked');
+  assert.ok(!logs.includes(LINE_SUB) && !logs.includes(ID_TOKEN), 'never the full subject or the ID token');
+});
+
+test('listGrants shows a customer grant with a masked subject and a staff grant with none', async () => {
+  const world = lineWorld();
+  globalThis.fetch = lineVerifies();
+  await exchangeWith(world);
+  const now = new Date().toISOString();
+  world.grants.push({
+    id: 99, clientId: 'mcp_client_line', adminUserId: 1, adminTokenId: 8, ownsAdminToken: false, scope: null, subject: null,
+    expiresAt: now, refreshExpiresAt: now, lastUsedAt: null, createdAt: now,
+  });
+
+  const listed = await oauthService({ strapi: world.strapi }).listGrants();
+  const customer = listed.find((grant: any) => grant.id !== 99);
+  const staff = listed.find((grant: any) => grant.id === 99);
+  assert.equal(customer.subject, 'line:U4af…88');
+  assert.equal(staff.subject, null);
+  assert.ok(!JSON.stringify(listed).includes(LINE_SUB), 'the full subject never reaches the admin page');
 });
