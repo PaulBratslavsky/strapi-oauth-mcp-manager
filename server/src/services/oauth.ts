@@ -174,6 +174,15 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     return token;
   };
 
+  /**
+   * The client's mapped admin token can't back a customer session (token exchange check 5). Only an
+   * admin can fix that, so the log says how, and the customer's app gets a generic 503.
+   */
+  const lineSignInUnavailable = (client: OAuthClient, problemAndFix: string) => {
+    strapi.log.warn(`[${PLUGIN_ID}] LINE sign-in failed for client "${client.name}" (${client.clientId}): ${problemAndFix}`);
+    return new OAuthError('temporarily_unavailable', LINE_SIGN_IN_UNAVAILABLE, 503);
+  };
+
   const issueTokens = ({ refresh = true, ttl }: { refresh?: boolean; ttl?: number } = {}) => {
     const { accessTokenTtl, refreshTokenTtl } = config();
     const lifetime = ttl ?? accessTokenTtl;
@@ -402,7 +411,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       if (client.endUserProvider !== 'line') {
         throw new OAuthError('unauthorized_client', 'This client is not set up for LINE sign-in');
       }
-      const provider = getLineProvider(config());
+      const provider = getLineProvider(config(), strapi.log);
       if (!provider) {
         throw new OAuthError('unauthorized_client', 'LINE sign-in is not configured');
       }
@@ -416,12 +425,25 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
 
       const mapped = await this.getMappedToken(client);
       if (!mapped || mapped.missing || mapped.ownerId === null) {
-        throw new OAuthError('invalid_grant', 'This client has no usable admin token. Map one on the MCP OAuth page.');
+        const problem = !mapped
+          ? 'This client has no mapped admin token.'
+          : mapped.missing
+            ? "This client's mapped admin token was deleted."
+            : "This client's mapped admin token has no owner.";
+        throw lineSignInUnavailable(client, `${problem} Map an admin token on the MCP OAuth page.`);
       }
       if (!(await isActiveUser(mapped.ownerId))) {
-        throw new OAuthError('invalid_grant', "The owner of this client's admin token is no longer active");
+        throw lineSignInUnavailable(
+          client,
+          "The owner of this client's admin token is no longer active. Reactivate them, or map another admin token on the MCP OAuth page."
+        );
       }
-      const adminToken = await loadOwnedToken(mapped.id, mapped.ownerId);
+      const adminToken = await loadOwnedToken(mapped.id, mapped.ownerId).catch((error) => {
+        // loadOwnedToken says what's wrong with the token: expired, key unreadable, or gone.
+        throw error instanceof OAuthError
+          ? lineSignInUnavailable(client, `This client's admin token was refused ("${error.description}"). Map an admin token on the MCP OAuth page.`)
+          : error;
+      });
       const tokens = issueTokens({ refresh: false, ttl: config().endUserAccessTokenTtl });
 
       const grant = await strapi.db.query(UID.grant).create({

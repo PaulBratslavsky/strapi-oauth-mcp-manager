@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import pluginConfig from '../../server/src/config';
 import oauthController from '../../server/src/controllers/oauth';
-import oauthService from '../../server/src/services/oauth';
+import oauthService, { OAuthError } from '../../server/src/services/oauth';
 import { hashToken } from '../../server/src/utils/crypto';
 import { GRANT_TYPE_TOKEN_EXCHANGE, TOKEN_TYPE_ACCESS_TOKEN, TOKEN_TYPE_ID_TOKEN } from '../../server/src/utils/end-user';
 import { LINE_SUB, allLogs, lineVerifies, lineWorld } from './helpers/in-memory-strapi';
@@ -27,17 +27,24 @@ const fakeStrapi = (overrides: Record<string, unknown> = {}, service?: Record<st
   }) as any;
 
 const ctxFor = (body: Record<string, string>) => {
-  const headers: Record<string, string> = {};
-  return { request: { body, headers: {}, origin: 'http://localhost:1337' }, set: (key: string, value: string) => (headers[key] = value), status: 200, body: undefined as any };
+  const responseHeaders: Record<string, string> = {};
+  return {
+    request: { body, headers: {}, origin: 'http://localhost:1337' },
+    responseHeaders,
+    set: (key: string, value: string) => (responseHeaders[key] = value),
+    status: 200,
+    body: undefined as any,
+  };
 };
 
-const tokenRequest = async (client: object, body: Record<string, string>) => {
+const tokenRequest = async (client: object, body: Record<string, string>, overrides: Record<string, unknown> = {}) => {
   const calls: string[] = [];
   const service = {
     authenticateClient: async () => client,
     exchangeAuthorizationCode: async () => (calls.push('authorization_code'), { access_token: 'staff' }),
     refreshGrant: async () => (calls.push('refresh_token'), { access_token: 'refreshed' }),
     exchangeIdToken: async (_client: object, params: object) => (calls.push('exchange'), { access_token: 'customer', params }),
+    ...overrides,
   };
   const ctx = ctxFor(body);
   await oauthController({ strapi: fakeStrapi(LINE_CONFIG, service) }).token(ctx);
@@ -79,6 +86,26 @@ test('a staff client, including one created before 1.1, cannot use token exchang
 test('unknown grant types are unsupported_grant_type', async () => {
   const { ctx } = await tokenRequest(staffClient, { grant_type: 'password' });
   assert.equal(ctx.body.error, 'unsupported_grant_type');
+});
+
+test('temporarily_unavailable answers tell the app when to retry', async () => {
+  const exchange = { grant_type: GRANT_TYPE_TOKEN_EXCHANGE, subject_token: 'x', subject_token_type: TOKEN_TYPE_ID_TOKEN };
+  const unavailable = await tokenRequest(lineClient, exchange, {
+    exchangeIdToken: async () => {
+      throw new OAuthError('temporarily_unavailable', "LINE sign-in isn't available right now. Try again later.", 503);
+    },
+  });
+  assert.equal(unavailable.ctx.status, 503);
+  assert.equal(unavailable.ctx.body.error, 'temporarily_unavailable');
+  assert.equal(unavailable.ctx.responseHeaders['Retry-After'], '5');
+
+  const invalid = await tokenRequest(lineClient, exchange, {
+    exchangeIdToken: async () => {
+      throw new OAuthError('invalid_grant', 'The LINE ID token is invalid or expired');
+    },
+  });
+  assert.equal(invalid.ctx.status, 400);
+  assert.ok(!('Retry-After' in invalid.ctx.responseHeaders), 'only temporarily_unavailable gets Retry-After');
 });
 
 test('exchangeIdToken refuses when LINE sign-in is not configured', async () => {
@@ -124,6 +151,11 @@ const exchangeWith = async (world: ReturnType<typeof lineWorld>) => {
   const client = await service.authenticateClient('mcp_client_line', undefined);
   return service.exchangeIdToken(client, { subjectToken: ID_TOKEN, subjectTokenType: TOKEN_TYPE_ID_TOKEN, resource: 'http://localhost:1337/mcp' });
 };
+
+const unknownOrInactiveClient = (error: any) => error.error === 'invalid_client' && error.status === 401 && error.description === 'Unknown or inactive client';
+/** A generic answer for the customer's app: nothing about admin tokens or who owns them. */
+const signInUnavailable = (error: any) =>
+  error.error === 'temporarily_unavailable' && error.status === 503 && error.description === "LINE sign-in isn't available right now. Try again later.";
 
 test('a successful exchange creates a customer grant on the mapped token, with no refresh token', async () => {
   const world = lineWorld({ config: { endUserAccessTokenTtl: 900 } });
@@ -177,13 +209,67 @@ test('listGrants shows a customer grant with a masked subject and a staff grant 
   assert.ok(!JSON.stringify(listed).includes(LINE_SUB), 'the full subject never reaches the admin page');
 });
 
+// Check 5: the client's mapped admin token must be able to back the session. Only an admin can fix
+// that, so the customer's app gets a generic temporarily_unavailable and the log says what to do.
+
+const checkFiveFailures: Array<{ name: string; breakWorld: (world: ReturnType<typeof lineWorld>) => void; fix: RegExp }> = [
+  {
+    name: 'no mapped admin token',
+    breakWorld: (world) => (world.clients[0].adminTokenId = null),
+    fix: /This client has no mapped admin token\. Map an admin token on the MCP OAuth page\./,
+  },
+  {
+    name: 'the mapped admin token was deleted',
+    breakWorld: (world) => world.apiTokens.splice(world.apiTokens.findIndex((token) => token.id === 7), 1),
+    fix: /This client's mapped admin token was deleted\. Map an admin token on the MCP OAuth page\./,
+  },
+  {
+    name: "the mapped token's owner is inactive",
+    breakWorld: (world) => (world.users[0].isActive = false),
+    fix: /The owner of this client's admin token is no longer active\./,
+  },
+  {
+    name: 'the mapped admin token expired',
+    breakWorld: (world) => (world.apiTokens.find((token) => token.id === 7)!.expiresAt = new Date(Date.now() - 60_000).toISOString()),
+    fix: /has expired.*Map an admin token on the MCP OAuth page\./,
+  },
+  {
+    name: "the mapped admin token's key can't be read",
+    breakWorld: (world) => (world.apiTokens.find((token) => token.id === 7)!.accessKey = null),
+    fix: /key cannot be read.*Map an admin token on the MCP OAuth page\./,
+  },
+];
+
+for (const failure of checkFiveFailures) {
+  test(`${failure.name}: the customer gets temporarily_unavailable and the log gets the fix`, async () => {
+    const world = lineWorld();
+    failure.breakWorld(world);
+    globalThis.fetch = lineVerifies();
+
+    await assert.rejects(exchangeWith(world), signInUnavailable);
+    assert.deepEqual(world.grants, []);
+    assert.equal(world.logs.warn.length, 1, world.logs.warn.join('\n'));
+    assert.match(world.logs.warn[0], /LINE sign-in failed for client "Maison app" \(mcp_client_line\)/);
+    assert.match(world.logs.warn[0], failure.fix);
+    const logs = allLogs(world.logs);
+    assert.ok(!logs.includes(ID_TOKEN) && !logs.includes(LINE_SUB), 'never the ID token or the full subject');
+  });
+}
+
+test("LINE being down is temporarily_unavailable, and the log says why", async () => {
+  const world = lineWorld();
+  globalThis.fetch = (async () => new Response('{}', { status: 503 })) as any;
+  await assert.rejects(exchangeWith(world), (error: any) => error.error === 'temporarily_unavailable' && error.status === 503);
+  assert.deepEqual(world.grants, []);
+  assert.equal(world.logs.warn.length, 1);
+  assert.match(world.logs.warn[0], /Could not verify a LINE ID token with http:\/\/line\.test\/verify: LINE answered HTTP 503/);
+  assert.ok(!allLogs(world.logs).includes(ID_TOKEN), 'never the ID token');
+});
+
 // Kill switches while LINE is checking the ID token (up to 5 seconds). The controller authenticated
 // the client before that call, so the exchange must look at the client again after creating the grant.
 
 type Service = ReturnType<typeof oauthService>;
-const unknownOrInactiveClient = (error: any) => error.error === 'invalid_client' && error.status === 401 && error.description === 'Unknown or inactive client';
-const signInUnavailable = (error: any) =>
-  error.error === 'temporarily_unavailable' && error.status === 503 && error.description === "LINE sign-in isn't available right now. Try again later.";
 
 const killSwitches: Array<{ name: string; pull: (service: Service) => Promise<unknown>; refusal: (error: any) => boolean }> = [
   { name: 'deactivated', pull: (service) => service.setClientActive(1, false), refusal: unknownOrInactiveClient },

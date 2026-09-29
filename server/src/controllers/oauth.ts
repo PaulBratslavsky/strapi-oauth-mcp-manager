@@ -65,11 +65,17 @@ const recordLoginFailure = (key: string) => {
 
 const str = (value: unknown) => (typeof value === 'string' ? value : undefined);
 
+/** How long an app should wait before retrying a temporarily_unavailable answer, in seconds. */
+const RETRY_AFTER_SECONDS = 5;
+
 const sendOAuthError = (ctx: any, error: unknown, strapi: Core.Strapi) => {
   if (error instanceof OAuthError) {
     ctx.status = error.status;
     if (error.status === 401) {
       ctx.set('WWW-Authenticate', 'Basic realm="strapi-mcp-oauth"');
+    }
+    if (error.error === 'temporarily_unavailable') {
+      ctx.set('Retry-After', String(RETRY_AFTER_SECONDS));
     }
     ctx.body = error.toJSON();
     return;

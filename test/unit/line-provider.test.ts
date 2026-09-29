@@ -60,6 +60,45 @@ test('maps a LINE 400 to invalid_grant', async () => {
   await assert.rejects(provider(lineSays).verify('t'), failsWith('invalid_grant'));
 });
 
+test('maps other 4xx answers to invalid_grant, except rate limiting (429) and timeouts (408)', async () => {
+  for (const status of [401, 403, 404]) {
+    await assert.rejects(provider(respond(status, { error: 'invalid_request' })).verify('t'), failsWith('invalid_grant'), String(status));
+  }
+  for (const status of [408, 429]) {
+    await assert.rejects(provider(respond(status, { message: 'slow down' })).verify('t'), failsWith('temporarily_unavailable', 503), String(status));
+  }
+});
+
+test("logs why LINE couldn't answer, never the ID token", async () => {
+  const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), { code: 'ECONNREFUSED' });
+  const outages: Array<[string, (...args: any[]) => Promise<Response>, RegExp]> = [
+    ['network error', async () => { throw new TypeError('fetch failed', { cause: refused }); }, /request failed \(ECONNREFUSED\)/],
+    ['timeout', async () => { throw new DOMException('The operation timed out.', 'TimeoutError'); }, /no answer within 5 seconds/],
+    ['5xx', respond(503, { message: 'unavailable' }), /HTTP 503/],
+    ['rate limit', respond(429, { message: 'slow down' }), /HTTP 429/],
+    ['request timeout', respond(408, { message: 'timeout' }), /HTTP 408/],
+    ['unreadable answer', async () => new Response('<html>oops</html>', { status: 200 }), /not JSON/],
+  ];
+  for (const [name, fetchImpl, reason] of outages) {
+    const warnings: string[] = [];
+    const line = createLineProvider({ channelId: CHANNEL, verifyUrl: 'http://line.test/verify' }, fetchImpl as any, { warn: (message) => warnings.push(message) });
+    await assert.rejects(line.verify('id-token-secret'), failsWith('temporarily_unavailable', 503), name);
+    assert.equal(warnings.length, 1, name);
+    assert.match(warnings[0], reason, name);
+    assert.match(warnings[0], /http:\/\/line\.test\/verify/, `${name}: says which endpoint failed`);
+    assert.ok(!warnings[0].includes('id-token-secret'), `${name}: never the ID token`);
+  }
+});
+
+test('a rejected ID token is not logged as an outage', async () => {
+  const warnings: string[] = [];
+  const line = createLineProvider({ channelId: CHANNEL, verifyUrl: 'http://line.test/verify' }, respond(400, { error: 'invalid_request' }) as any, {
+    warn: (message) => warnings.push(message),
+  });
+  await assert.rejects(line.verify('t'), failsWith('invalid_grant'));
+  assert.deepEqual(warnings, []);
+});
+
 test('maps network errors, timeouts, 5xx and unreadable answers to temporarily_unavailable (503)', async () => {
   const failures = [
     async () => {

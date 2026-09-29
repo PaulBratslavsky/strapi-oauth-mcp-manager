@@ -10,3 +10,8 @@ export interface IdentityProvider {
   /** Throws OAuthError: invalid_grant for a bad token, temporarily_unavailable (503) when the provider can't answer. */
   verify(idToken: string): Promise<VerifiedIdentity>;
 }
+
+/** Where a provider tells the operator why it couldn't check a token. */
+export interface ProviderLog {
+  warn(message: string): void;
+}
