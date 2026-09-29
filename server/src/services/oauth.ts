@@ -19,7 +19,16 @@ import type { PluginConfig } from '../config';
 import { TOKEN_PREFIX, generateToken, hashToken, safeEqual, verifyPkce } from '../utils/crypto';
 import { normalizeRedirectUris } from '../utils/url';
 import { OAuthError } from '../utils/oauth-error';
-import { applyClientRules, assertCanSetClientToken, endUserProviderOf, type EndUserProvider } from '../utils/end-user';
+import { getLineProvider } from '../identity';
+import {
+  TOKEN_TYPE_ACCESS_TOKEN,
+  TOKEN_TYPE_ID_TOKEN,
+  applyClientRules,
+  assertCanSetClientToken,
+  endUserProviderOf,
+  maskSubject,
+  type EndUserProvider,
+} from '../utils/end-user';
 
 export { OAuthError };
 
@@ -160,24 +169,27 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     return token;
   };
 
-  const issueTokens = () => {
-    const accessToken = generateToken(TOKEN_PREFIX.accessToken);
-    const refreshToken = generateToken(TOKEN_PREFIX.refreshToken);
+  const issueTokens = ({ refresh = true, ttl }: { refresh?: boolean; ttl?: number } = {}) => {
     const { accessTokenTtl, refreshTokenTtl } = config();
+    const lifetime = ttl ?? accessTokenTtl;
+    const accessToken = generateToken(TOKEN_PREFIX.accessToken);
+    const refreshToken = refresh ? generateToken(TOKEN_PREFIX.refreshToken) : null;
+    const expiresAt = toIso(lifetime);
     return {
       accessToken,
       refreshToken,
       row: {
         accessTokenHash: hashToken(accessToken),
-        refreshTokenHash: hashToken(refreshToken),
-        expiresAt: toIso(accessTokenTtl),
-        refreshExpiresAt: toIso(refreshTokenTtl),
+        refreshTokenHash: refreshToken ? hashToken(refreshToken) : null,
+        expiresAt,
+        // Without a refresh token the grant ends with its access token. Cleanup and the admin page read this date.
+        refreshExpiresAt: refreshToken ? toIso(refreshTokenTtl) : expiresAt,
       },
       response: (scope?: string | null) => ({
         access_token: accessToken,
         token_type: 'Bearer',
-        expires_in: accessTokenTtl,
-        refresh_token: refreshToken,
+        expires_in: lifetime,
+        ...(refreshToken ? { refresh_token: refreshToken } : {}),
         ...(scope ? { scope } : {}),
       }),
     };
@@ -371,6 +383,58 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         throw new OAuthError('invalid_grant', 'Invalid refresh token');
       }
       return tokens.response(grant.scope);
+    },
+
+    /**
+     * RFC 8693 token exchange: a customer's LINE ID token for a short-lived MCP session. The
+     * session runs with the client's mapped admin token and remembers the customer (`subject`),
+     * which tool plugins read with resolveSubject. No refresh token: the app exchanges again.
+     */
+    async exchangeIdToken(
+      client: OAuthClient,
+      params: { subjectToken?: string; subjectTokenType?: string; resource?: string }
+    ) {
+      if (client.endUserProvider !== 'line') {
+        throw new OAuthError('unauthorized_client', 'This client is not set up for LINE sign-in');
+      }
+      const provider = getLineProvider(config());
+      if (!provider) {
+        throw new OAuthError('unauthorized_client', 'LINE sign-in is not configured');
+      }
+      if (!params.subjectToken || params.subjectTokenType !== TOKEN_TYPE_ID_TOKEN) {
+        throw new OAuthError(
+          'invalid_request',
+          `subject_token (a LINE ID token) and subject_token_type=${TOKEN_TYPE_ID_TOKEN} are required`
+        );
+      }
+      const { subject } = await provider.verify(params.subjectToken);
+
+      const mapped = await this.getMappedToken(client);
+      if (!mapped || mapped.missing || mapped.ownerId === null) {
+        throw new OAuthError('invalid_grant', 'This client has no usable admin token. Map one on the MCP OAuth page.');
+      }
+      if (!(await isActiveUser(mapped.ownerId))) {
+        throw new OAuthError('invalid_grant', "The owner of this client's admin token is no longer active");
+      }
+      const adminToken = await loadOwnedToken(mapped.id, mapped.ownerId);
+      const tokens = issueTokens({ refresh: false, ttl: config().endUserAccessTokenTtl });
+
+      await strapi.db.query(UID.grant).create({
+        data: {
+          ...tokens.row,
+          clientId: client.clientId,
+          adminUserId: mapped.ownerId,
+          adminTokenId: adminToken.id,
+          ownsAdminToken: false,
+          adminKeyHash: hashToken(adminToken.accessKey),
+          scope: 'mcp',
+          resource: params.resource ?? null,
+          subject,
+        },
+      });
+
+      strapi.log.info(`[${PLUGIN_ID}] Issued a customer session for client "${client.name}" (${maskSubject(subject)})`);
+      return { ...tokens.response('mcp'), issued_token_type: TOKEN_TYPE_ACCESS_TOKEN };
     },
 
     /**

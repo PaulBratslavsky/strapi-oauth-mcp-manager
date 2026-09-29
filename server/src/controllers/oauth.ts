@@ -13,8 +13,11 @@ import { OAuthError, type OAuthClient, type OAuthService, type TokenEndpointAuth
 import { signConsentTicket, verifyConsentTicket } from '../utils/crypto';
 import { getBaseUrl, getEndpoints, isAllowedRegisteredRedirectUri, matchRedirectUri } from '../utils/url';
 import { renderAuthorizePage, renderChooseAccessPage, renderErrorPage } from '../views/authorize-page';
+import { getLineProvider } from '../identity';
+import { GRANT_TYPE_TOKEN_EXCHANGE, assertGrantTypeAllowed } from '../utils/end-user';
 
 const AUTH_METHODS: TokenEndpointAuthMethod[] = ['client_secret_basic', 'client_secret_post', 'none'];
+const GRANT_TYPES = ['authorization_code', 'refresh_token', GRANT_TYPE_TOKEN_EXCHANGE];
 
 // Simple in-memory brute-force guard for the login form: 5 failures per IP+email per 15 minutes.
 // The map is bounded so a flood of distinct emails can't grow memory without limit.
@@ -224,7 +227,11 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
         revocation_endpoint: endpoints.revocation,
         response_types_supported: ['code'],
         response_modes_supported: ['query'],
-        grant_types_supported: ['authorization_code', 'refresh_token'],
+        grant_types_supported: [
+          'authorization_code',
+          'refresh_token',
+          ...(getLineProvider(config()) ? [GRANT_TYPE_TOKEN_EXCHANGE] : []),
+        ],
         token_endpoint_auth_methods_supported: AUTH_METHODS,
         revocation_endpoint_auth_methods_supported: AUTH_METHODS,
         code_challenge_methods_supported: ['S256'],
@@ -409,17 +416,26 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
       try {
         const { clientId, clientSecret } = readClientCredentials(ctx);
         const client = await service().authenticateClient(clientId, clientSecret);
+        const grantType = str(body.grant_type) ?? '';
+        if (!GRANT_TYPES.includes(grantType)) {
+          throw new OAuthError('unsupported_grant_type', `grant_type must be one of ${GRANT_TYPES.join(', ')}`);
+        }
+        assertGrantTypeAllowed(client.endUserProvider, grantType);
 
-        if (body.grant_type === 'authorization_code') {
+        if (grantType === 'authorization_code') {
           ctx.body = await service().exchangeAuthorizationCode(client, {
             code: str(body.code),
             redirectUri: str(body.redirect_uri),
             codeVerifier: str(body.code_verifier),
           });
-        } else if (body.grant_type === 'refresh_token') {
+        } else if (grantType === 'refresh_token') {
           ctx.body = await service().refreshGrant(client, str(body.refresh_token));
         } else {
-          throw new OAuthError('unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
+          ctx.body = await service().exchangeIdToken(client, {
+            subjectToken: str(body.subject_token),
+            subjectTokenType: str(body.subject_token_type),
+            resource: str(body.resource),
+          });
         }
       } catch (error) {
         sendOAuthError(ctx, error, strapi);
