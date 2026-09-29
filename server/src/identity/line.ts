@@ -41,6 +41,9 @@ export const createLineProvider = (
     } catch {
       throw unavailable();
     }
+    if (typeof claims !== 'object' || claims === null) {
+      throw unavailable();
+    }
     const expiresAt = typeof claims.exp === 'number' ? new Date(claims.exp * 1000) : null;
     const valid =
       claims.aud === settings.channelId &&

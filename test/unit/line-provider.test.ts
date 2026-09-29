@@ -70,6 +70,7 @@ test('maps network errors, timeouts, 5xx and unreadable answers to temporarily_u
     },
     respond(502, { message: 'bad gateway' }),
     async () => new Response('<html>oops</html>', { status: 200 }),
+    async () => new Response('null', { status: 200 }),
   ];
   for (const fetchImpl of failures) {
     await assert.rejects(provider(fetchImpl).verify('t'), failsWith('temporarily_unavailable', 503));
