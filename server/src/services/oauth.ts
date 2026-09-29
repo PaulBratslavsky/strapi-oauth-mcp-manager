@@ -19,6 +19,7 @@ import type { PluginConfig } from '../config';
 import { TOKEN_PREFIX, generateToken, hashToken, safeEqual, verifyPkce } from '../utils/crypto';
 import { normalizeRedirectUris } from '../utils/url';
 import { OAuthError } from '../utils/oauth-error';
+import { applyClientRules, assertCanSetClientToken, endUserProviderOf, type EndUserProvider } from '../utils/end-user';
 
 export { OAuthError };
 
@@ -40,6 +41,8 @@ export interface OAuthClient {
   registrationType: 'manual' | 'dynamic';
   /** When set, every session for this client uses this admin token, and only its owner can approve. */
   adminTokenId?: number | null;
+  /** "line" clients sign customers in with LINE through token exchange; "none" clients are for staff. */
+  endUserProvider: EndUserProvider;
   active: boolean;
 }
 
@@ -68,6 +71,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     redirectUris: normalizeRedirectUris(row.redirectUris),
     // A client without a secret can only ever authenticate as a public client.
     tokenEndpointAuthMethod: row.clientSecret ? row.tokenEndpointAuthMethod ?? 'client_secret_post' : 'none',
+    endUserProvider: endUserProviderOf(row.endUserProvider),
   });
 
   /**
@@ -486,6 +490,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       if (!client) {
         return null;
       }
+      assertCanSetClientToken(endUserProviderOf(client.endUserProvider), adminTokenId);
       if (adminTokenId !== null) {
         const selectable = await this.listSelectableTokens(actingUserId);
         if (!selectable.some((t) => t.id === adminTokenId)) {
@@ -565,7 +570,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
 
     async listClients() {
       const clients = await strapi.db.query(UID.client).findMany({
-        select: ['id', 'documentId', 'name', 'clientId', 'redirectUris', 'tokenEndpointAuthMethod', 'registrationType', 'adminTokenId', 'active', 'createdAt'],
+        select: ['id', 'documentId', 'name', 'clientId', 'redirectUris', 'tokenEndpointAuthMethod', 'registrationType', 'adminTokenId', 'endUserProvider', 'active', 'createdAt'],
         orderBy: { createdAt: 'desc' },
       });
       const tokenIds = clients.map((c: any) => c.adminTokenId).filter(Boolean);
@@ -582,6 +587,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         return {
           ...c,
           redirectUris: normalizeRedirectUris(c.redirectUris),
+          endUserProvider: endUserProviderOf(c.endUserProvider),
           adminToken: c.adminTokenId
             ? token
               ? { id: token.id, name: token.name, ownerId: token.adminUserOwner?.id ?? null, ownerEmail: token.adminUserOwner?.email ?? null }
@@ -592,24 +598,38 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     },
 
     /** Create a client from the admin panel. The secret is returned once and never shown again. */
-    async createClient(input: { name: string; redirectUris: string[]; confidential: boolean; adminTokenId?: number | null; actingUserId: number }) {
-      if (input.adminTokenId) {
+    async createClient(input: {
+      name: string;
+      redirectUris: string[];
+      confidential: boolean;
+      adminTokenId?: number | null;
+      endUserProvider?: EndUserProvider;
+      actingUserId: number;
+    }) {
+      const rules = applyClientRules({
+        endUserProvider: input.endUserProvider ?? 'none',
+        confidential: input.confidential,
+        redirectUris: input.redirectUris,
+        adminTokenId: input.adminTokenId ?? null,
+      });
+      if (rules.adminTokenId) {
         const selectable = await this.listSelectableTokens(input.actingUserId);
-        if (!selectable.some((t) => t.id === input.adminTokenId)) {
+        if (!selectable.some((t) => t.id === rules.adminTokenId)) {
           throw new OAuthError('invalid_request', 'You can only map an admin token you own');
         }
       }
       const clientId = generateToken(TOKEN_PREFIX.clientId, 16);
-      const clientSecret = input.confidential ? generateToken(TOKEN_PREFIX.clientSecret) : null;
+      const clientSecret = rules.confidential ? generateToken(TOKEN_PREFIX.clientSecret) : null;
       const row = await strapi.db.query(UID.client).create({
         data: {
           name: input.name.slice(0, 100),
           clientId,
           clientSecret,
-          redirectUris: input.redirectUris,
-          tokenEndpointAuthMethod: input.confidential ? 'client_secret_post' : 'none',
+          redirectUris: rules.redirectUris,
+          tokenEndpointAuthMethod: rules.confidential ? 'client_secret_post' : 'none',
           registrationType: 'manual',
-          adminTokenId: input.adminTokenId ?? null,
+          adminTokenId: rules.adminTokenId,
+          endUserProvider: rules.endUserProvider,
           active: true,
         },
       });

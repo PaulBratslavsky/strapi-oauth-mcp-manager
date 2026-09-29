@@ -51,9 +51,6 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
       if (!name) {
         return ctx.badRequest('name is required');
       }
-      if (redirectUris.length === 0) {
-        return ctx.badRequest('At least one redirect URI is required');
-      }
       const invalid = redirectUris.find((uri) => {
         try {
           new URL(uri.replace(/\*/g, 'x'));
@@ -74,6 +71,7 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
             redirectUris,
             confidential: body.confidential !== false,
             adminTokenId,
+            endUserProvider: body.endUserProvider === 'line' ? 'line' : 'none',
             actingUserId: ctx.state.user.id,
           }),
         };

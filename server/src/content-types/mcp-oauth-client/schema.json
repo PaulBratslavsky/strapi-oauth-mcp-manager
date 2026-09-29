@@ -33,8 +33,7 @@
       "private": true
     },
     "redirectUris": {
-      "type": "json",
-      "required": true
+      "type": "json"
     },
     "tokenEndpointAuthMethod": {
       "type": "enumeration",
@@ -57,6 +56,11 @@
     },
     "adminTokenId": {
       "type": "integer"
+    },
+    "endUserProvider": {
+      "type": "enumeration",
+      "enum": ["none", "line"],
+      "default": "none"
     },
     "description": {
       "type": "text"
