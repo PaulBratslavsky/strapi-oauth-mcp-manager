@@ -174,6 +174,95 @@ These sign-in methods aren't supported:
 
 ---
 
+## Customer sign-in with LINE
+
+Staff connect with their Strapi admin account. Your **customers** can use MCP tools too, from an app inside LINE (a LIFF app or LINE MINI App). The app exchanges the customer's LINE ID token for a short-lived session, and your tools find out who the customer is.
+
+### Set it up
+
+1. **Configure the LINE channel** whose ID tokens you accept. That's the LINE Login or LINE MINI App channel that hosts your app.
+
+   ```ts
+   // config/plugins.ts
+   'strapi-oauth-mcp-manager': {
+     config: {
+       identityProviders: env('LINE_LOGIN_CHANNEL_ID')
+         ? { line: { channelId: env('LINE_LOGIN_CHANNEL_ID') } }
+         : {},
+       endUserAccessTokenTtl: 3600,
+     },
+   },
+   ```
+
+2. **Create an admin token for customers** under Settings → Admin Tokens. Every customer session runs with its permissions, so grant only what customers may do.
+3. **Add a client** on the **MCP OAuth** page. Choose **Customer sign-in: LINE** and map that token. LINE clients are public, and don't need a redirect URI.
+4. **Allow your app's origin** in `config/middlewares.ts`, because the app calls Strapi from the browser:
+
+   ```ts
+   {
+     name: 'strapi::cors',
+     config: {
+       origin: ['https://your-app.example.com'],
+       methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+       headers: ['Content-Type', 'Authorization', 'Accept', 'mcp-session-id', 'mcp-protocol-version', 'Last-Event-ID'],
+       expose: ['WWW-Authenticate', 'mcp-session-id', 'mcp-protocol-version'],
+     },
+   },
+   ```
+
+### Exchange the ID token in your app
+
+The LIFF app needs the `openid` scope for `liff.getIDToken()`.
+
+```js
+await liff.init({ liffId });
+if (!liff.isLoggedIn()) liff.login();
+
+const response = await fetch(`${STRAPI_URL}/api/strapi-oauth-mcp-manager/oauth/token`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+    client_id: LINE_CLIENT_ID,
+    subject_token: liff.getIDToken(),
+    subject_token_type: 'urn:ietf:params:oauth:token-type:id_token',
+    resource: `${STRAPI_URL}/mcp`,
+  }),
+});
+const { access_token, expires_in } = await response.json();
+// Call ${STRAPI_URL}/mcp with "Authorization: Bearer <access_token>". There is no refresh token:
+// exchange a fresh ID token when the session expires.
+```
+
+### Use the customer's identity in your tools
+
+Tool handlers see the caller's original `Authorization` header, so ask this plugin who holds the session:
+
+```ts
+createHandler: (strapi) => async ({ args, extra }) => {
+  const subject = await strapi
+    .plugin('strapi-oauth-mcp-manager')
+    .service('oauth')
+    .resolveSubject(extra.requestInfo?.headers?.authorization); // "line:U…" or null
+  if (!subject) {
+    // Not a signed-in customer: a staff session, a plain admin token, or no session at all.
+  }
+  // ...scope the tool to this customer
+};
+```
+
+Never take the customer from a tool argument or a custom header. A header set by a middleware doesn't reach tools, and one sent by the caller could be forged. The session token can't be.
+
+### Limits
+
+- **No rate limit on the token endpoint.** Put one in front of it (proxy or WAF) for public apps.
+- **A captured ID token can be exchanged until it expires,** like any bearer token. Sessions last at most `endUserAccessTokenTtl`.
+- **To end customer sessions,** deactivate or delete the LINE client, delete or regenerate its admin token, or revoke sessions on the **MCP OAuth** page.
+- **`identityProviders.line.verifyUrl`** is only for tests and local development, for example `node test/e2e/mock-line-verify.mjs`. Never set it in production.
+- **Every LINE client accepts ID tokens from the configured channel.** If you create several, a customer can use any of them, so keep one LINE client per channel, or map tokens with the same permissions.
+
+---
+
 ## How it works
 
 ```mermaid
@@ -288,6 +377,8 @@ End-to-end tests run against a development Strapi app that has the MCP server en
 ```bash
 BASE=http://localhost:1337 ADMIN_EMAIL=you@example.com ADMIN_PASSWORD=... npm run test:e2e
 ```
+
+The suites use the test app's Article type with the fields in `FIELDS` (default `title,body`); set `FIELDS=title,description`, for example, if your Article type has different fields.
 
 The tests sign in many times, so turn off the admin login rate limit in that app (`rateLimit: { enabled: false }` in `config/admin.ts`). They also create users, tokens and sessions and change the Editor and Author roles temporarily, so don't point them at production.
 

@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.0
+
+Customer sign-in with LINE, for apps that expose MCP tools to their own users.
+
+### Added
+
+- Token exchange (RFC 8693) at the token endpoint: a LINE client posts a customer's LINE ID token (`liff.getIDToken()`) and gets a short-lived MCP session. The session runs with the client's mapped admin token.
+- `resolveSubject(authorization)` on the `oauth` service. Tool plugins pass the `Authorization` header their handler received and get the customer's `line:U…` subject, or `null` for staff sessions, plain admin tokens and anything invalid.
+- Configuration: `identityProviders.line.channelId`, the test-only `identityProviders.line.verifyUrl`, and `endUserAccessTokenTtl` (default 3600 seconds).
+- "Customer sign-in" when adding a client on the **MCP OAuth** page, a Customer column in the sessions list (masked), and token exchange details under Connection details.
+- Discovery lists the token exchange grant when LINE sign-in is configured.
+
+### Changed
+
+- New fields: `endUserProvider` on clients (existing clients are staff clients), and `subject` on grants.
+- LINE clients are always public, must keep a mapped admin token, and may have no redirect URI.
+- Customer sessions have no refresh token. They expire after `endUserAccessTokenTtl`, and the app exchanges a fresh ID token.
+
+### Breaking changes
+
+None. Staff sign-in, dynamic client registration, refresh rotation and revocation work as before.
+
 ## 1.0.0
 
 A rewrite that adds OAuth sign-in to the MCP server built into Strapi 5.47+ (`/mcp`).

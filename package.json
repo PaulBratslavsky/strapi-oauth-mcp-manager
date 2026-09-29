@@ -1,6 +1,6 @@
 {
   "name": "strapi-oauth-mcp-manager",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "OAuth 2.1 authorization server for Strapi's official MCP server (/mcp). Lets Claude, ChatGPT, and other MCP clients connect with a Strapi admin login instead of a pasted token.",
   "keywords": [
     "strapi",
