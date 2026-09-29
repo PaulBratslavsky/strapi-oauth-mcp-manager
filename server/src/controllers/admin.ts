@@ -119,11 +119,19 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
         if (typeof body.active !== 'boolean') {
           return ctx.badRequest('active must be a boolean');
         }
-        const client = await service().setClientActive(id, body.active);
-        if (!client) {
-          return ctx.notFound('Client not found');
+        try {
+          const client = await service().setClientActive(id, body.active);
+          if (!client) {
+            return ctx.notFound('Client not found');
+          }
+          result.active = client.active;
+        } catch (error) {
+          // For example a second active LINE client. The admin page shows this message.
+          if (error instanceof OAuthError) {
+            return ctx.badRequest(error.description);
+          }
+          throw error;
         }
-        result.active = client.active;
       }
 
       ctx.body = { data: result };

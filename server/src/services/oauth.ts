@@ -175,6 +175,24 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
   };
 
   /**
+   * Every LINE client accepts ID tokens from the one configured LINE channel, so a customer could
+   * sign in through any active one and get its admin token. Allow one active LINE client at a time.
+   */
+  const assertNoOtherActiveLineClient = async (exceptId?: number) => {
+    const active = await strapi.db.query(UID.client).findMany({
+      where: { endUserProvider: 'line', active: true },
+      select: ['id', 'name'],
+    });
+    const other = active.find((client: any) => client.id !== exceptId);
+    if (other) {
+      throw new OAuthError(
+        'invalid_request',
+        `Only one LINE client can be active at a time. LINE clients all accept ID tokens from the one configured LINE channel, so they're interchangeable. Deactivate or delete "${other.name}" first.`
+      );
+    }
+  };
+
+  /**
    * The client's mapped admin token can't back a customer session (token exchange check 5). Only an
    * admin can fix that, so the log says how, and the customer's app gets a generic 503.
    */
@@ -749,6 +767,9 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
           throw new OAuthError('invalid_request', 'You can only map an admin token you own');
         }
       }
+      if (rules.endUserProvider === 'line') {
+        await assertNoOtherActiveLineClient();
+      }
       const clientId = generateToken(TOKEN_PREFIX.clientId, 16);
       const clientSecret = rules.confidential ? generateToken(TOKEN_PREFIX.clientSecret) : null;
       const row = await strapi.db.query(UID.client).create({
@@ -768,6 +789,12 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     },
 
     async setClientActive(id: number, active: boolean) {
+      if (active) {
+        const existing = await strapi.db.query(UID.client).findOne({ where: { id }, select: ['id', 'endUserProvider'] });
+        if (existing && endUserProviderOf(existing.endUserProvider) === 'line') {
+          await assertNoOtherActiveLineClient(id);
+        }
+      }
       // Update before sweeping: a token exchange in flight re-reads the client (see exchangeIdToken).
       const client = await strapi.db.query(UID.client).update({ where: { id }, data: { active } });
       if (client && !active) {

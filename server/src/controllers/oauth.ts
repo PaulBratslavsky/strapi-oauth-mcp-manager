@@ -164,6 +164,14 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
       sendHtml(ctx, 400, renderErrorPage('Unknown or inactive client. The client may need to register again.'));
       return null;
     }
+    if (client.endUserProvider === 'line') {
+      sendHtml(
+        ctx,
+        400,
+        renderErrorPage('This client signs customers in with LINE and can only use token exchange, not this sign-in page (unauthorized_client).')
+      );
+      return null;
+    }
     if (!redirectUri || !matchRedirectUri(redirectUri, client.redirectUris)) {
       strapi.log.warn(`[${PLUGIN_ID}] Rejected redirect_uri "${redirectUri}" for client ${client.clientId}`);
       sendHtml(ctx, 400, renderErrorPage('The redirect URI is not registered for this client.'));
