@@ -11,7 +11,7 @@ const SUB = `U${'a'.repeat(32)}`;
 const mock = await startMockLineVerify({ port: 4545, channelId: CHANNEL });
 const form = (params) =>
   fetch(`${OAUTH}/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params) })
-    .then(async (res) => ({ status: res.status, body: await res.json() }));
+    .then(async (res) => ({ status: res.status, body: await res.json(), retryAfter: res.headers.get('retry-after') }));
 const exchange = (clientId, subjectToken, extra = {}) =>
   form({ grant_type: EXCHANGE, client_id: clientId, subject_token: subjectToken, subject_token_type: ID_TOKEN, resource: `${BASE}/mcp`, ...extra });
 
@@ -39,6 +39,10 @@ const listed = (await plugin('GET', '/clients')).body.data.find((c) => c.clientI
 check('the client is listed as LINE', listed?.endUserProvider === 'line');
 res = await plugin('PUT', `/clients/${line.id}`, { adminTokenId: null });
 check("a LINE client's token can't be removed", res.status === 400, JSON.stringify(res.body));
+res = await plugin('POST', '/clients', { name: 'E2E LINE app 2', endUserProvider: 'line', redirectUris: [], adminTokenId: readOnly.id });
+check('a second active LINE client is refused', res.status === 400 && /interchangeable/.test(res.body?.error?.message), JSON.stringify(res.body));
+res = await fetch(`${OAUTH}/authorize?${new URLSearchParams({ response_type: 'code', client_id: line.clientId, redirect_uri: 'http://localhost:33418/callback', code_challenge: 'x'.repeat(43) })}`, { redirect: 'manual' });
+check('/authorize refuses a LINE client (unauthorized_client)', res.status === 400 && (await res.text()).includes('unauthorized_client'), String(res.status));
 
 // 2. Exchange
 res = await exchange(line.clientId, `valid.${SUB}`);
@@ -77,7 +81,20 @@ await plugin('PUT', `/clients/${line.id}`, { active: false });
 res = await mcp(session, 'initialize', initializeParams);
 check('deactivating the LINE client ends its customer sessions', res.status === 401, String(res.status));
 
+// 5. One active LINE client, and a LINE client an admin must fix
+const spare = await admin.createAdminToken('E2E LINE spare', [contentPermission('read')]);
+res = await plugin('POST', '/clients', { name: 'E2E LINE app 2', endUserProvider: 'line', redirectUris: [], adminTokenId: spare.id });
+check('a LINE client can be created while the other one is inactive', res.status === 201, JSON.stringify(res.body));
+const second = res.body.data;
+res = await plugin('PUT', `/clients/${line.id}`, { active: true });
+check('a LINE client cannot be re-activated while another one is active', res.status === 400 && /interchangeable/.test(res.body?.error?.message), JSON.stringify(res.body));
+await admin.call('DELETE', `/admin/admin-tokens/${spare.id}`);
+res = await exchange(second.clientId, `valid.${SUB}`);
+check('a LINE client whose admin token was deleted answers temporarily_unavailable with Retry-After',
+  res.status === 503 && res.body.error === 'temporarily_unavailable' && res.retryAfter === '5', `${JSON.stringify(res.body)} Retry-After: ${res.retryAfter}`);
+
 // Cleanup
+await plugin('DELETE', `/clients/${second.id}`);
 await plugin('DELETE', `/clients/${line.id}`);
 const staffListed = (await plugin('GET', '/clients')).body.data.find((c) => c.clientId === staff.body.client_id);
 if (staffListed) await plugin('DELETE', `/clients/${staffListed.id}`);
