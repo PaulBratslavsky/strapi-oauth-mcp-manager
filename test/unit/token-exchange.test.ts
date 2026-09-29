@@ -224,6 +224,11 @@ const checkFiveFailures: Array<{ name: string; breakWorld: (world: ReturnType<ty
     fix: /This client's mapped admin token was deleted\. Map an admin token on the MCP OAuth page\./,
   },
   {
+    name: 'the mapped admin token has no owner',
+    breakWorld: (world) => (world.apiTokens.find((token) => token.id === 7)!.adminUserOwner = null),
+    fix: /This client's mapped admin token has no owner\. Map an admin token on the MCP OAuth page\./,
+  },
+  {
     name: "the mapped token's owner is inactive",
     breakWorld: (world) => (world.users[0].isActive = false),
     fix: /The owner of this client's admin token is no longer active\./,
