@@ -26,6 +26,15 @@ check('discovery lists token exchange', true);
 
 const admin = await adminSession();
 const plugin = (method, path, body) => admin.call(method, `/${PLUGIN}${path}`, body);
+
+// Only one LINE client can be active at a time, and this suite creates its own
+const activeLineClients = (await plugin('GET', '/clients')).body.data.filter((c) => c.endUserProvider === 'line' && c.active);
+if (activeLineClients.length > 0) {
+  console.error(`Only one LINE client can be active at a time. Deactivate ${activeLineClients.map((c) => `"${c.name}"`).join(', ')} in the app at ${BASE} first.`);
+  await mock.close();
+  process.exit(1);
+}
+
 const readOnly = await admin.createAdminToken('E2E LINE read-only', [contentPermission('read')]);
 
 // 1. Client rules

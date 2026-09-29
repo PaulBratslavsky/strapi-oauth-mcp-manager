@@ -401,7 +401,7 @@ BASE=http://localhost:1337 ADMIN_EMAIL=you@example.com ADMIN_PASSWORD=... npm ru
 
 The suites use the test app's Article type with the fields in `FIELDS` (default `title,body`); set `FIELDS=title,description`, for example, if your Article type has different fields. `SUBJECT` (default `api::article.article`) sets the content type those permissions are for.
 
-The LINE suite (`test/e2e/line-exchange.mjs`) starts a mock LINE verify server on port 4545, so keep that port free. The test app needs customer sign-in pointed at it. Have its `config/plugins.ts` read two variables:
+The LINE suite (`test/e2e/line-exchange.mjs`) starts a mock LINE verify server on port 4545, so keep that port free. It creates its own LINE client, so no other LINE client may be active in the test app. The test app needs customer sign-in pointed at the mock. Have its `config/plugins.ts` read two variables:
 
 ```ts
 'strapi-oauth-mcp-manager': {
