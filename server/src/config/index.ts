@@ -72,8 +72,10 @@ export default {
       }
       const line = (providers as IdentityProvidersConfig).line as Partial<LineProviderConfig> | undefined;
       if (line !== undefined) {
-        if (typeof line?.channelId !== 'string' || line.channelId.trim() === '') {
-          throw new Error('[strapi-oauth-mcp-manager] config.identityProviders.line.channelId must be your LINE channel ID');
+        if (typeof line?.channelId !== 'string' || !/^\d+$/.test(line.channelId)) {
+          throw new Error(
+            '[strapi-oauth-mcp-manager] config.identityProviders.line.channelId must be the channel ID of your LINE Login channel (or LINE MINI App channel): digits only, such as "1657000000". It is not the LIFF ID ("1657000000-AbcdEfgh").'
+          );
         }
         if (line.verifyUrl !== undefined && (typeof line.verifyUrl !== 'string' || !/^https?:\/\/\S+$/.test(line.verifyUrl))) {
           throw new Error('[strapi-oauth-mcp-manager] config.identityProviders.line.verifyUrl must be an http(s) URL');

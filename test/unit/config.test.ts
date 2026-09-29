@@ -30,3 +30,14 @@ test('rejects bad customer sign-in settings', () => {
     assert.throws(validate(value), message, JSON.stringify(value));
   }
 });
+
+test('the LINE channel ID is digits only: the LINE Login channel ID, not the LIFF ID', () => {
+  for (const channelId of ['1657000000-AbcdEfgh', ' 1657000000', '1657000000 ', 'channel-id', 1657000000]) {
+    assert.throws(
+      validate({ identityProviders: { line: { channelId } } }),
+      (error: Error) => /channelId/.test(error.message) && /LINE Login channel/.test(error.message) && /not the LIFF ID/.test(error.message),
+      JSON.stringify(channelId)
+    );
+  }
+  assert.doesNotThrow(validate({ identityProviders: { line: { channelId: '1234567890' } } }));
+});
