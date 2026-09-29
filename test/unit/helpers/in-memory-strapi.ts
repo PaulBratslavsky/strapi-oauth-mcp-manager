@@ -3,7 +3,7 @@
 import pluginConfig from '../../../server/src/config';
 import { PLUGIN_ID } from '../../../server/src/pluginId';
 
-export const UID = {
+const UID = {
   client: `plugin::${PLUGIN_ID}.mcp-oauth-client`,
   code: `plugin::${PLUGIN_ID}.mcp-oauth-code`,
   grant: `plugin::${PLUGIN_ID}.mcp-oauth-token`,
@@ -22,7 +22,7 @@ const matchesCondition = (value: any, condition: any): boolean => {
   return value === condition;
 };
 
-export const matches = (row: Row, where: Row = {}): boolean =>
+const matches = (row: Row, where: Row = {}): boolean =>
   Object.entries(where).every(([key, condition]) =>
     key === '$or' ? (condition as Row[]).some((alternative) => matches(row, alternative)) : matchesCondition(row[key], condition)
   );
@@ -33,12 +33,12 @@ const pick = (row: Row, select?: string[], populate?: string[] | Row) => {
   return Object.fromEntries(keys.filter((key) => key in row).map((key) => [key, row[key]]));
 };
 
-export interface TableHooks {
+interface TableHooks {
   /** Runs after findMany has read its rows and before it returns them (a stale read, as in a real race). */
   afterFindMany?: (where: Row | undefined) => Promise<void>;
 }
 
-export const table = (rows: Row[], hooks: TableHooks = {}) => {
+const table = (rows: Row[], hooks: TableHooks = {}) => {
   let nextId = rows.reduce((max, row) => Math.max(max, row.id ?? 0), 0) + 1;
   return {
     async findOne({ where, select, populate }: Row = {}) {
@@ -148,7 +148,7 @@ export const inMemoryStrapi = (world: InMemoryWorld = {}) => {
 /** Everything a test might log, for "never logged" assertions. */
 export const allLogs = (logs: Record<string, string[]>) => Object.values(logs).flat().join('\n');
 
-export const LINE_CONFIG = { identityProviders: { line: { channelId: '1657000000', verifyUrl: 'http://line.test/verify' } } };
+const LINE_CONFIG = { identityProviders: { line: { channelId: '1657000000', verifyUrl: 'http://line.test/verify' } } };
 export const LINE_SUB = 'U4af4980629c1a7b3f1e2d3c4b5a69788';
 
 /**
