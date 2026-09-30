@@ -3,6 +3,7 @@ import { PLUGIN_ID } from '../pluginId';
 import type { PluginConfig } from '../config';
 import { OAuthError, type OAuthService } from '../services/oauth';
 import { getEndpoints, normalizeRedirectUris } from '../utils/url';
+import { GRANT_TYPE_TOKEN_EXCHANGE, TOKEN_TYPE_ID_TOKEN } from '../utils/end-user';
 
 const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
   const service = (): OAuthService => strapi.plugin(PLUGIN_ID).service('oauth');
@@ -18,6 +19,11 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
           dynamicClientRegistration: config.dynamicClientRegistration,
           allowUserPermissions: config.allowUserPermissions,
           endpoints,
+          lineSignIn: {
+            configured: Boolean(config.identityProviders?.line),
+            channelId: config.identityProviders?.line?.channelId ?? null,
+          },
+          tokenExchange: { grantType: GRANT_TYPE_TOKEN_EXCHANGE, subjectTokenType: TOKEN_TYPE_ID_TOKEN },
         },
       };
     },
@@ -51,9 +57,6 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
       if (!name) {
         return ctx.badRequest('name is required');
       }
-      if (redirectUris.length === 0) {
-        return ctx.badRequest('At least one redirect URI is required');
-      }
       const invalid = redirectUris.find((uri) => {
         try {
           new URL(uri.replace(/\*/g, 'x'));
@@ -74,6 +77,7 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
             redirectUris,
             confidential: body.confidential !== false,
             adminTokenId,
+            endUserProvider: body.endUserProvider === 'line' ? 'line' : 'none',
             actingUserId: ctx.state.user.id,
           }),
         };
@@ -115,11 +119,19 @@ const adminController = ({ strapi }: { strapi: Core.Strapi }) => {
         if (typeof body.active !== 'boolean') {
           return ctx.badRequest('active must be a boolean');
         }
-        const client = await service().setClientActive(id, body.active);
-        if (!client) {
-          return ctx.notFound('Client not found');
+        try {
+          const client = await service().setClientActive(id, body.active);
+          if (!client) {
+            return ctx.notFound('Client not found');
+          }
+          result.active = client.active;
+        } catch (error) {
+          // For example a second active LINE client. The admin page shows this message.
+          if (error instanceof OAuthError) {
+            return ctx.badRequest(error.description);
+          }
+          throw error;
         }
-        result.active = client.active;
       }
 
       ctx.body = { data: result };

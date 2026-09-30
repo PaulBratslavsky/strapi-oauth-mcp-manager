@@ -1,6 +1,6 @@
 {
   "name": "strapi-oauth-mcp-manager",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "OAuth 2.1 authorization server for Strapi's official MCP server (/mcp). Lets Claude, ChatGPT, and other MCP clients connect with a Strapi admin login instead of a pasted token.",
   "keywords": [
     "strapi",
@@ -58,9 +58,9 @@
     "watch": "strapi-plugin watch",
     "watch:link": "strapi-plugin watch:link",
     "verify": "strapi-plugin verify",
-    "test:ts:front": "run -T tsc -p admin/tsconfig.json",
-    "test:ts:back": "run -T tsc -p server/tsconfig.json",
-    "test:e2e": "node test/e2e/oauth-flow.mjs && node test/e2e/admin-clients.mjs && node test/e2e/users.mjs && node test/e2e/client-token.mjs",
+    "test:ts:front": "tsc -p admin/tsconfig.json --noEmit",
+    "test:ts:back": "tsc -p server/tsconfig.json --noEmit",
+    "test:e2e": "node test/e2e/oauth-flow.mjs && node test/e2e/admin-clients.mjs && node test/e2e/users.mjs && node test/e2e/client-token.mjs && node test/e2e/line-exchange.mjs",
     "test": "node --import tsx --test test/unit/*.test.ts",
     "prepublishOnly": "npm test && npm run verify"
   },

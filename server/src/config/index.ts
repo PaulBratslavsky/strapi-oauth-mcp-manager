@@ -1,3 +1,14 @@
+export interface LineProviderConfig {
+  /** Channel ID of the LINE Login or LINE MINI App channel whose ID tokens are accepted. */
+  channelId: string;
+  /** For tests and local development only: where to verify ID tokens. Defaults to LINE's endpoint. */
+  verifyUrl?: string;
+}
+
+export interface IdentityProvidersConfig {
+  line?: LineProviderConfig;
+}
+
 export interface PluginConfig {
   /** Lifetime of an OAuth access token, in seconds. */
   accessTokenTtl: number;
@@ -20,6 +31,10 @@ export interface PluginConfig {
    * token the user picks.
    */
   allowUserPermissions: boolean;
+  /** Identity providers whose ID tokens customers can exchange for an MCP session. Empty means off. */
+  identityProviders: IdentityProvidersConfig;
+  /** Lifetime of a customer session from token exchange, in seconds. There is no refresh token. */
+  endUserAccessTokenTtl: number;
 }
 
 export default {
@@ -31,11 +46,40 @@ export default {
     dynamicClientRegistration: true,
     cleanupIntervalMs: 60 * 60 * 1000,
     allowUserPermissions: false,
+    identityProviders: {},
+    endUserAccessTokenTtl: 60 * 60,
   } satisfies PluginConfig,
   validator(config: Partial<PluginConfig>) {
     for (const key of ['accessTokenTtl', 'refreshTokenTtl', 'authorizationCodeTtl', 'refreshTokenReuseWindow', 'cleanupIntervalMs'] as const) {
       if (config[key] !== undefined && (typeof config[key] !== 'number' || config[key] < 0)) {
         throw new Error(`[strapi-oauth-mcp-manager] config.${key} must be a non-negative number`);
+      }
+    }
+    if (
+      config.endUserAccessTokenTtl !== undefined &&
+      (!Number.isInteger(config.endUserAccessTokenTtl) || config.endUserAccessTokenTtl <= 0)
+    ) {
+      throw new Error('[strapi-oauth-mcp-manager] config.endUserAccessTokenTtl must be a positive whole number of seconds');
+    }
+    const providers = config.identityProviders as unknown;
+    if (providers !== undefined) {
+      if (typeof providers !== 'object' || providers === null || Array.isArray(providers)) {
+        throw new Error('[strapi-oauth-mcp-manager] config.identityProviders must be an object, e.g. { line: { channelId } }');
+      }
+      const unknownProviders = Object.keys(providers).filter((key) => key !== 'line');
+      if (unknownProviders.length > 0) {
+        throw new Error(`[strapi-oauth-mcp-manager] config.identityProviders only supports "line" (got ${unknownProviders.join(', ')})`);
+      }
+      const line = (providers as IdentityProvidersConfig).line as Partial<LineProviderConfig> | undefined;
+      if (line !== undefined) {
+        if (typeof line?.channelId !== 'string' || !/^\d+$/.test(line.channelId)) {
+          throw new Error(
+            '[strapi-oauth-mcp-manager] config.identityProviders.line.channelId must be the channel ID of your LINE Login channel (or LINE MINI App channel): digits only, such as "1657000000". It is not the LIFF ID ("1657000000-AbcdEfgh").'
+          );
+        }
+        if (line.verifyUrl !== undefined && (typeof line.verifyUrl !== 'string' || !/^https?:\/\/\S+$/.test(line.verifyUrl))) {
+          throw new Error('[strapi-oauth-mcp-manager] config.identityProviders.line.verifyUrl must be an http(s) URL');
+        }
       }
     }
   },

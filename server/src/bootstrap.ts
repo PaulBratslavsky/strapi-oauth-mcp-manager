@@ -26,6 +26,14 @@ const bootstrap = async ({ strapi }: { strapi: Core.Strapi }) => {
     );
   }
 
+  const config = strapi.config.get(`plugin::${PLUGIN_ID}`) as PluginConfig;
+  const verifyUrl = config.identityProviders?.line?.verifyUrl;
+  if (verifyUrl) {
+    strapi.log.warn(
+      `[${PLUGIN_ID}] identityProviders.line.verifyUrl is set: ${verifyUrl} replaces LINE's ID token verification. Use it only for local testing.`
+    );
+  }
+
   // Runs after the global middlewares (so the body is parsed) and before the router
   // mounts core's /mcp route.
   strapi.server.use(mcpOauthMiddleware({}, { strapi }));
@@ -59,7 +67,7 @@ const bootstrap = async ({ strapi }: { strapi: Core.Strapi }) => {
       }
     },
   } as any);
-  const { cleanupIntervalMs } = strapi.config.get(`plugin::${PLUGIN_ID}`) as PluginConfig;
+  const { cleanupIntervalMs } = config;
   if (cleanupIntervalMs > 0) {
     const cleanup = () =>
       service

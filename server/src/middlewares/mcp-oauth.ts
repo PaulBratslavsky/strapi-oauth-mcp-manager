@@ -15,13 +15,9 @@
 import type { Core } from '@strapi/strapi';
 import { PLUGIN_ID } from '../pluginId';
 import type { OAuthService } from '../services/oauth';
+import { extractBearerToken } from '../utils/bearer';
 import { TOKEN_PREFIX } from '../utils/crypto';
 import { MCP_PATH, getEndpoints } from '../utils/url';
-
-const extractBearerToken = (header: string | undefined) => {
-  const match = header?.match(/^Bearer\s+(\S+)$/i);
-  return match ? match[1] : null;
-};
 
 const unauthorized = (ctx: any, strapi: Core.Strapi, error?: { code: string; description: string }) => {
   const { protectedResourceMetadata } = getEndpoints(ctx, strapi);
@@ -71,7 +67,6 @@ const mcpOauthMiddleware = (_config: unknown, { strapi }: { strapi: Core.Strapi 
 
     // Core reads ctx.request.header.authorization, which is the same object as req.headers.
     ctx.request.headers.authorization = `Bearer ${result.adminAccessKey}`;
-    ctx.state.mcpOAuthGrantId = result.grantId;
     return next();
   };
 };

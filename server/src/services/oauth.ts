@@ -16,8 +16,22 @@
 import type { Core } from '@strapi/strapi';
 import { PLUGIN_ID } from '../pluginId';
 import type { PluginConfig } from '../config';
+import { extractBearerToken } from '../utils/bearer';
 import { TOKEN_PREFIX, generateToken, hashToken, safeEqual, verifyPkce } from '../utils/crypto';
 import { normalizeRedirectUris } from '../utils/url';
+import { OAuthError } from '../utils/oauth-error';
+import { getLineProvider } from '../identity';
+import {
+  TOKEN_TYPE_ACCESS_TOKEN,
+  TOKEN_TYPE_ID_TOKEN,
+  applyClientRules,
+  assertCanSetClientToken,
+  endUserProviderOf,
+  maskSubject,
+  type EndUserProvider,
+} from '../utils/end-user';
+
+export { OAuthError };
 
 const UID = {
   client: `plugin::${PLUGIN_ID}.mcp-oauth-client`,
@@ -37,21 +51,9 @@ export interface OAuthClient {
   registrationType: 'manual' | 'dynamic';
   /** When set, every session for this client uses this admin token, and only its owner can approve. */
   adminTokenId?: number | null;
+  /** "line" clients sign customers in with LINE through token exchange; "none" clients are for staff. */
+  endUserProvider: EndUserProvider;
   active: boolean;
-}
-
-export class OAuthError extends Error {
-  constructor(
-    public error: string,
-    public description: string,
-    public status = 400
-  ) {
-    super(description);
-  }
-
-  toJSON() {
-    return { error: this.error, error_description: this.description };
-  }
 }
 
 export interface SelectableToken {
@@ -67,8 +69,12 @@ export type AccessTokenResult =
 
 const MINTED_TOKEN_PREFIX = 'MCP OAuth · ';
 
+/** What a customer's app is told when LINE sign-in fails for a reason only an admin can fix. */
+const LINE_SIGN_IN_UNAVAILABLE = "LINE sign-in isn't available right now. Try again later.";
+
 const toIso = (secondsFromNow: number) => new Date(Date.now() + secondsFromNow * 1000).toISOString();
 const isExpired = (date: string | Date | null | undefined) => !date || new Date(date).getTime() <= Date.now();
+const unknownOrInactiveClient = () => new OAuthError('invalid_client', 'Unknown or inactive client', 401);
 
 const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
   const config = (): PluginConfig => strapi.config.get(`plugin::${PLUGIN_ID}`) as PluginConfig;
@@ -79,6 +85,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     redirectUris: normalizeRedirectUris(row.redirectUris),
     // A client without a secret can only ever authenticate as a public client.
     tokenEndpointAuthMethod: row.clientSecret ? row.tokenEndpointAuthMethod ?? 'client_secret_post' : 'none',
+    endUserProvider: endUserProviderOf(row.endUserProvider),
   });
 
   /**
@@ -167,24 +174,54 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     return token;
   };
 
-  const issueTokens = () => {
-    const accessToken = generateToken(TOKEN_PREFIX.accessToken);
-    const refreshToken = generateToken(TOKEN_PREFIX.refreshToken);
+  /**
+   * Every LINE client accepts ID tokens from the one configured LINE channel, so a customer could
+   * sign in through any active one and get its admin token. Allow one active LINE client at a time.
+   */
+  const assertNoOtherActiveLineClient = async (exceptId?: number) => {
+    const active = await strapi.db.query(UID.client).findMany({
+      where: { endUserProvider: 'line', active: true },
+      select: ['id', 'name'],
+    });
+    const other = active.find((client: any) => client.id !== exceptId);
+    if (other) {
+      throw new OAuthError(
+        'invalid_request',
+        `Only one LINE client can be active at a time. LINE clients all accept ID tokens from the one configured LINE channel, so they're interchangeable. Deactivate or delete "${other.name}" first.`
+      );
+    }
+  };
+
+  /**
+   * The client's mapped admin token can't back a customer session (token exchange check 5). Only an
+   * admin can fix that, so the log says how, and the customer's app gets a generic 503.
+   */
+  const lineSignInUnavailable = (client: OAuthClient, problemAndFix: string) => {
+    strapi.log.warn(`[${PLUGIN_ID}] LINE sign-in failed for client "${client.name}" (${client.clientId}): ${problemAndFix}`);
+    return new OAuthError('temporarily_unavailable', LINE_SIGN_IN_UNAVAILABLE, 503);
+  };
+
+  const issueTokens = ({ refresh = true, ttl }: { refresh?: boolean; ttl?: number } = {}) => {
     const { accessTokenTtl, refreshTokenTtl } = config();
+    const lifetime = ttl ?? accessTokenTtl;
+    const accessToken = generateToken(TOKEN_PREFIX.accessToken);
+    const refreshToken = refresh ? generateToken(TOKEN_PREFIX.refreshToken) : null;
+    const expiresAt = toIso(lifetime);
     return {
       accessToken,
       refreshToken,
       row: {
         accessTokenHash: hashToken(accessToken),
-        refreshTokenHash: hashToken(refreshToken),
-        expiresAt: toIso(accessTokenTtl),
-        refreshExpiresAt: toIso(refreshTokenTtl),
+        refreshTokenHash: refreshToken ? hashToken(refreshToken) : null,
+        expiresAt,
+        // Without a refresh token the grant ends with its access token. Cleanup and the admin page read this date.
+        refreshExpiresAt: refreshToken ? toIso(refreshTokenTtl) : expiresAt,
       },
       response: (scope?: string | null) => ({
         access_token: accessToken,
         token_type: 'Bearer',
-        expires_in: accessTokenTtl,
-        refresh_token: refreshToken,
+        expires_in: lifetime,
+        ...(refreshToken ? { refresh_token: refreshToken } : {}),
         ...(scope ? { scope } : {}),
       }),
     };
@@ -206,7 +243,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     async authenticateClient(clientId: string | undefined, clientSecret: string | undefined) {
       const client = await this.findClient(clientId ?? '');
       if (!client) {
-        throw new OAuthError('invalid_client', 'Unknown or inactive client', 401);
+        throw unknownOrInactiveClient();
       }
       if (client.tokenEndpointAuthMethod !== 'none') {
         if (!clientSecret || !client.clientSecret || !safeEqual(clientSecret, client.clientSecret)) {
@@ -381,6 +418,85 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     },
 
     /**
+     * RFC 8693 token exchange: a customer's LINE ID token for a short-lived MCP session. The
+     * session runs with the client's mapped admin token and remembers the customer (`subject`),
+     * which tool plugins read with resolveSubject. No refresh token: the app exchanges again.
+     */
+    async exchangeIdToken(
+      client: OAuthClient,
+      params: { subjectToken?: string; subjectTokenType?: string; resource?: string }
+    ) {
+      if (client.endUserProvider !== 'line') {
+        throw new OAuthError('unauthorized_client', 'This client is not set up for LINE sign-in');
+      }
+      const provider = getLineProvider(config(), strapi.log);
+      if (!provider) {
+        throw new OAuthError('unauthorized_client', 'LINE sign-in is not configured');
+      }
+      if (!params.subjectToken || params.subjectTokenType !== TOKEN_TYPE_ID_TOKEN) {
+        throw new OAuthError(
+          'invalid_request',
+          `subject_token (a LINE ID token) and subject_token_type=${TOKEN_TYPE_ID_TOKEN} are required`
+        );
+      }
+      const { subject } = await provider.verify(params.subjectToken);
+
+      const mapped = await this.getMappedToken(client);
+      if (!mapped || mapped.missing || mapped.ownerId === null) {
+        const problem = !mapped
+          ? 'This client has no mapped admin token.'
+          : mapped.missing
+            ? "This client's mapped admin token was deleted."
+            : "This client's mapped admin token has no owner.";
+        throw lineSignInUnavailable(client, `${problem} Map an admin token on the MCP OAuth page.`);
+      }
+      if (!(await isActiveUser(mapped.ownerId))) {
+        throw lineSignInUnavailable(
+          client,
+          "The owner of this client's admin token is no longer active. Reactivate them, or map another admin token on the MCP OAuth page."
+        );
+      }
+      const adminToken = await loadOwnedToken(mapped.id, mapped.ownerId).catch((error) => {
+        // loadOwnedToken says what's wrong with the token: expired, key unreadable, or gone.
+        throw error instanceof OAuthError
+          ? lineSignInUnavailable(client, `This client's admin token was refused ("${error.description}"). Map an admin token on the MCP OAuth page.`)
+          : error;
+      });
+      const tokens = issueTokens({ refresh: false, ttl: config().endUserAccessTokenTtl });
+
+      const grant = await strapi.db.query(UID.grant).create({
+        data: {
+          ...tokens.row,
+          clientId: client.clientId,
+          adminUserId: mapped.ownerId,
+          adminTokenId: adminToken.id,
+          ownsAdminToken: false,
+          adminKeyHash: hashToken(adminToken.accessKey),
+          scope: 'mcp',
+          resource: params.resource ?? null,
+          subject,
+        },
+      });
+
+      // The client was checked before LINE answered, which can take seconds. Deactivating, deleting
+      // or re-mapping a client changes the client row before sweeping its grants, so reading it again
+      // now either sees that change or leaves this grant for the sweep to find.
+      const current = await strapi.db.query(UID.client).findOne({
+        where: { id: client.id },
+        select: ['id', 'active', 'adminTokenId'],
+      });
+      if (!current || !current.active || Number(current.adminTokenId) !== Number(adminToken.id)) {
+        await strapi.db.query(UID.grant).delete({ where: { id: grant.id } });
+        throw !current || !current.active
+          ? unknownOrInactiveClient()
+          : new OAuthError('temporarily_unavailable', LINE_SIGN_IN_UNAVAILABLE, 503);
+      }
+
+      strapi.log.info(`[${PLUGIN_ID}] Issued a customer session for client "${client.name}" (${maskSubject(subject)})`);
+      return { ...tokens.response('mcp'), issued_token_type: TOKEN_TYPE_ACCESS_TOKEN };
+    },
+
+    /**
      * A refresh token that was already rotated is being used again. Shortly after rotation this
      * is usually a client retrying in parallel, so only reject it. Later it suggests the token
      * leaked, so revoke the whole session.
@@ -445,6 +561,34 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       return { valid: true, adminAccessKey: adminToken.accessKey, grantId: grant.id };
     },
 
+    /**
+     * Which customer holds this MCP session: the grant's subject (e.g. "line:U…"). null means there is
+     * no verified customer (a staff session, a plain admin token, or an unknown or expired token), not
+     * that the caller is staff. Tool plugins pass the raw Authorization header from their handler's
+     * extra.requestInfo.headers; tools see the caller's original header.
+     *
+     * It identifies the customer but doesn't authenticate the request, so call it only from MCP tool
+     * handlers, where the middleware has already validated the session. Read-only: the middleware
+     * already validated and recorded this request.
+     */
+    async resolveSubject(authorization: string | string[] | undefined): Promise<string | null> {
+      if (typeof authorization !== 'string') {
+        return null;
+      }
+      const token = extractBearerToken(authorization);
+      if (!token || !token.startsWith(TOKEN_PREFIX.accessToken)) {
+        return null;
+      }
+      const grant = await strapi.db.query(UID.grant).findOne({
+        where: { accessTokenHash: hashToken(token) },
+        select: ['id', 'subject', 'expiresAt'],
+      });
+      if (!grant || !grant.subject || isExpired(grant.expiresAt)) {
+        return null;
+      }
+      return grant.subject as string;
+    },
+
     /** RFC 7009: revoke by access or refresh token. Unknown tokens are not an error. */
     async revokeByToken(client: OAuthClient, token: string) {
       const hash = hashToken(token);
@@ -497,6 +641,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       if (!client) {
         return null;
       }
+      assertCanSetClientToken(endUserProviderOf(client.endUserProvider), adminTokenId);
       if (adminTokenId !== null) {
         const selectable = await this.listSelectableTokens(actingUserId);
         if (!selectable.some((t) => t.id === adminTokenId)) {
@@ -504,6 +649,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         }
       }
       if ((client.adminTokenId ?? null) !== adminTokenId) {
+        // Update before sweeping: a token exchange in flight re-reads the client (see exchangeIdToken).
         await strapi.db.query(UID.client).update({ where: { id }, data: { adminTokenId } });
         await this.revokeClientGrants(client.clientId);
       }
@@ -544,7 +690,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
 
     async listGrants() {
       const grants = await strapi.db.query(UID.grant).findMany({
-        select: ['id', 'clientId', 'adminUserId', 'adminTokenId', 'ownsAdminToken', 'scope', 'expiresAt', 'refreshExpiresAt', 'lastUsedAt', 'createdAt'],
+        select: ['id', 'clientId', 'adminUserId', 'adminTokenId', 'ownsAdminToken', 'scope', 'subject', 'expiresAt', 'refreshExpiresAt', 'lastUsedAt', 'createdAt'],
         orderBy: { createdAt: 'desc' },
       });
       const clientIds = [...new Set(grants.map((g: any) => g.clientId))];
@@ -566,6 +712,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         const user: any = usersById.get(g.adminUserId);
         return {
           ...g,
+          subject: maskSubject(g.subject),
           clientName: clientNames.get(g.clientId) ?? g.clientId,
           userEmail: user?.email ?? null,
           userActive: Boolean(user && user.isActive === true && user.blocked !== true),
@@ -576,7 +723,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
 
     async listClients() {
       const clients = await strapi.db.query(UID.client).findMany({
-        select: ['id', 'documentId', 'name', 'clientId', 'redirectUris', 'tokenEndpointAuthMethod', 'registrationType', 'adminTokenId', 'active', 'createdAt'],
+        select: ['id', 'documentId', 'name', 'clientId', 'redirectUris', 'tokenEndpointAuthMethod', 'registrationType', 'adminTokenId', 'endUserProvider', 'active', 'createdAt'],
         orderBy: { createdAt: 'desc' },
       });
       const tokenIds = clients.map((c: any) => c.adminTokenId).filter(Boolean);
@@ -593,6 +740,7 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
         return {
           ...c,
           redirectUris: normalizeRedirectUris(c.redirectUris),
+          endUserProvider: endUserProviderOf(c.endUserProvider),
           adminToken: c.adminTokenId
             ? token
               ? { id: token.id, name: token.name, ownerId: token.adminUserOwner?.id ?? null, ownerEmail: token.adminUserOwner?.email ?? null }
@@ -603,24 +751,41 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     },
 
     /** Create a client from the admin panel. The secret is returned once and never shown again. */
-    async createClient(input: { name: string; redirectUris: string[]; confidential: boolean; adminTokenId?: number | null; actingUserId: number }) {
-      if (input.adminTokenId) {
+    async createClient(input: {
+      name: string;
+      redirectUris: string[];
+      confidential: boolean;
+      adminTokenId?: number | null;
+      endUserProvider?: EndUserProvider;
+      actingUserId: number;
+    }) {
+      const rules = applyClientRules({
+        endUserProvider: input.endUserProvider ?? 'none',
+        confidential: input.confidential,
+        redirectUris: input.redirectUris,
+        adminTokenId: input.adminTokenId ?? null,
+      });
+      if (rules.adminTokenId) {
         const selectable = await this.listSelectableTokens(input.actingUserId);
-        if (!selectable.some((t) => t.id === input.adminTokenId)) {
+        if (!selectable.some((t) => t.id === rules.adminTokenId)) {
           throw new OAuthError('invalid_request', 'You can only map an admin token you own');
         }
       }
+      if (rules.endUserProvider === 'line') {
+        await assertNoOtherActiveLineClient();
+      }
       const clientId = generateToken(TOKEN_PREFIX.clientId, 16);
-      const clientSecret = input.confidential ? generateToken(TOKEN_PREFIX.clientSecret) : null;
+      const clientSecret = rules.confidential ? generateToken(TOKEN_PREFIX.clientSecret) : null;
       const row = await strapi.db.query(UID.client).create({
         data: {
           name: input.name.slice(0, 100),
           clientId,
           clientSecret,
-          redirectUris: input.redirectUris,
-          tokenEndpointAuthMethod: input.confidential ? 'client_secret_post' : 'none',
+          redirectUris: rules.redirectUris,
+          tokenEndpointAuthMethod: rules.confidential ? 'client_secret_post' : 'none',
           registrationType: 'manual',
-          adminTokenId: input.adminTokenId ?? null,
+          adminTokenId: rules.adminTokenId,
+          endUserProvider: rules.endUserProvider,
           active: true,
         },
       });
@@ -628,6 +793,13 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
     },
 
     async setClientActive(id: number, active: boolean) {
+      if (active) {
+        const existing = await strapi.db.query(UID.client).findOne({ where: { id }, select: ['id', 'endUserProvider'] });
+        if (existing && endUserProviderOf(existing.endUserProvider) === 'line') {
+          await assertNoOtherActiveLineClient(id);
+        }
+      }
+      // Update before sweeping: a token exchange in flight re-reads the client (see exchangeIdToken).
       const client = await strapi.db.query(UID.client).update({ where: { id }, data: { active } });
       if (client && !active) {
         await this.revokeClientGrants(client.clientId);
@@ -640,6 +812,9 @@ const oauthService = ({ strapi }: { strapi: Core.Strapi }) => {
       if (!client) {
         return false;
       }
+      // Turn the client off before sweeping, as setClientActive does: a token exchange still waiting
+      // on LINE reads the client again after storing its grant, so it sees this or the sweep finds it.
+      await strapi.db.query(UID.client).update({ where: { id }, data: { active: false } });
       await this.revokeClientGrants(client.clientId);
       await strapi.db.query(UID.code).deleteMany({ where: { clientId: client.clientId } });
       await strapi.db.query(UID.client).delete({ where: { id } });

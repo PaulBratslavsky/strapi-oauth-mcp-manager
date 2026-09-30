@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.0
+
+Customer sign-in with LINE, for apps that expose MCP tools to their own users.
+
+### Added
+
+- Token exchange (RFC 8693) at the token endpoint: a LINE client posts a customer's LINE ID token (`liff.getIDToken()`) and gets a short-lived MCP session. The session runs with the client's mapped admin token.
+- `resolveSubject(authorization)` on the `oauth` service. Tool plugins pass the `Authorization` header their handler received and get the customer's `line:U…` subject, or `null` when there's no verified customer (staff sessions, plain admin tokens and anything invalid). Call it only from MCP tool handlers: it identifies the customer but doesn't authenticate the request.
+- Configuration: `identityProviders.line.channelId` (digits only: the LINE Login channel ID, not the LIFF ID), the test-only `identityProviders.line.verifyUrl` (Strapi warns at startup while it's set), and `endUserAccessTokenTtl` (default 3600 seconds).
+- "Customer sign-in" when adding a client on the **MCP OAuth** page, a Customer column in the sessions list (masked), and token exchange details under Connection details.
+- Discovery lists the token exchange grant when LINE sign-in is configured.
+
+### Changed
+
+- New fields: `endUserProvider` on clients (existing clients are staff clients), and `subject` on grants.
+- LINE clients are always public, must keep a mapped admin token, and may have no redirect URI. Only one LINE client can be active at a time, and LINE clients can't use the consent page (`/authorize`).
+- Customer sessions have no refresh token. They expire after `endUserAccessTokenTtl`, and the app exchanges a fresh ID token.
+- Token exchange answers `invalid_grant` only when LINE rejects the ID token. When LINE can't be reached or the LINE client's admin token can't be used, it answers `temporarily_unavailable` (503) with `Retry-After`, and the Strapi log says why.
+
+### Breaking changes
+
+None. Staff sign-in, dynamic client registration, refresh rotation and revocation work as before.
+
 ## 1.0.0
 
 A rewrite that adds OAuth sign-in to the MCP server built into Strapi 5.47+ (`/mcp`).

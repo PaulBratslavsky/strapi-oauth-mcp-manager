@@ -13,8 +13,11 @@ import { OAuthError, type OAuthClient, type OAuthService, type TokenEndpointAuth
 import { signConsentTicket, verifyConsentTicket } from '../utils/crypto';
 import { getBaseUrl, getEndpoints, isAllowedRegisteredRedirectUri, matchRedirectUri } from '../utils/url';
 import { renderAuthorizePage, renderChooseAccessPage, renderErrorPage } from '../views/authorize-page';
+import { getLineProvider } from '../identity';
+import { GRANT_TYPE_TOKEN_EXCHANGE, assertGrantTypeAllowed } from '../utils/end-user';
 
 const AUTH_METHODS: TokenEndpointAuthMethod[] = ['client_secret_basic', 'client_secret_post', 'none'];
+const GRANT_TYPES = ['authorization_code', 'refresh_token', GRANT_TYPE_TOKEN_EXCHANGE];
 
 // Simple in-memory brute-force guard for the login form: 5 failures per IP+email per 15 minutes.
 // The map is bounded so a flood of distinct emails can't grow memory without limit.
@@ -62,11 +65,17 @@ const recordLoginFailure = (key: string) => {
 
 const str = (value: unknown) => (typeof value === 'string' ? value : undefined);
 
+/** How long an app should wait before retrying a temporarily_unavailable answer, in seconds. */
+const RETRY_AFTER_SECONDS = 5;
+
 const sendOAuthError = (ctx: any, error: unknown, strapi: Core.Strapi) => {
   if (error instanceof OAuthError) {
     ctx.status = error.status;
     if (error.status === 401) {
       ctx.set('WWW-Authenticate', 'Basic realm="strapi-mcp-oauth"');
+    }
+    if (error.error === 'temporarily_unavailable') {
+      ctx.set('Retry-After', String(RETRY_AFTER_SECONDS));
     }
     ctx.body = error.toJSON();
     return;
@@ -155,6 +164,14 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
       sendHtml(ctx, 400, renderErrorPage('Unknown or inactive client. The client may need to register again.'));
       return null;
     }
+    if (client.endUserProvider === 'line') {
+      sendHtml(
+        ctx,
+        400,
+        renderErrorPage('This client signs customers in with LINE and can only use token exchange, not this sign-in page (unauthorized_client).')
+      );
+      return null;
+    }
     if (!redirectUri || !matchRedirectUri(redirectUri, client.redirectUris)) {
       strapi.log.warn(`[${PLUGIN_ID}] Rejected redirect_uri "${redirectUri}" for client ${client.clientId}`);
       sendHtml(ctx, 400, renderErrorPage('The redirect URI is not registered for this client.'));
@@ -224,7 +241,11 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
         revocation_endpoint: endpoints.revocation,
         response_types_supported: ['code'],
         response_modes_supported: ['query'],
-        grant_types_supported: ['authorization_code', 'refresh_token'],
+        grant_types_supported: [
+          'authorization_code',
+          'refresh_token',
+          ...(getLineProvider(config()) ? [GRANT_TYPE_TOKEN_EXCHANGE] : []),
+        ],
         token_endpoint_auth_methods_supported: AUTH_METHODS,
         revocation_endpoint_auth_methods_supported: AUTH_METHODS,
         code_challenge_methods_supported: ['S256'],
@@ -409,17 +430,26 @@ const oauthController = ({ strapi }: { strapi: Core.Strapi }) => {
       try {
         const { clientId, clientSecret } = readClientCredentials(ctx);
         const client = await service().authenticateClient(clientId, clientSecret);
+        const grantType = str(body.grant_type) ?? '';
+        if (!GRANT_TYPES.includes(grantType)) {
+          throw new OAuthError('unsupported_grant_type', `grant_type must be one of ${GRANT_TYPES.join(', ')}`);
+        }
+        assertGrantTypeAllowed(client.endUserProvider, grantType);
 
-        if (body.grant_type === 'authorization_code') {
+        if (grantType === 'authorization_code') {
           ctx.body = await service().exchangeAuthorizationCode(client, {
             code: str(body.code),
             redirectUri: str(body.redirect_uri),
             codeVerifier: str(body.code_verifier),
           });
-        } else if (body.grant_type === 'refresh_token') {
+        } else if (grantType === 'refresh_token') {
           ctx.body = await service().refreshGrant(client, str(body.refresh_token));
         } else {
-          throw new OAuthError('unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
+          ctx.body = await service().exchangeIdToken(client, {
+            subjectToken: str(body.subject_token),
+            subjectTokenType: str(body.subject_token_type),
+            resource: str(body.resource),
+          });
         }
       } catch (error) {
         sendOAuthError(ctx, error, strapi);
