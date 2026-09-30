@@ -428,7 +428,7 @@ const HomePage = () => {
                 <>
                   <CopyValue label="Token exchange grant type" value={overview.tokenExchange.grantType} />
                   <CopyValue label="Subject token type (LINE ID token)" value={overview.tokenExchange.subjectTokenType} />
-                  <Typography variant="pi" textColor="neutral600">
+                  <Typography tag="p" variant="pi" textColor="neutral600">
                     LINE sign-in is on for channel {overview.lineSignIn.channelId}. Customer apps post liff.getIDToken() to the
                     token endpoint with a LINE client's ID.
                   </Typography>
@@ -440,7 +440,7 @@ const HomePage = () => {
                   </Alert>
                 )
               )}
-              <Typography variant="pi" textColor="neutral600">
+              <Typography tag="p" variant="pi" textColor="neutral600">
                 Dynamic client registration is {overview.dynamicClientRegistration ? 'on' : 'off'}.
               </Typography>
             </Section>
